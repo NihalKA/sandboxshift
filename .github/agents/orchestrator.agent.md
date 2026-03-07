@@ -1,14 +1,10 @@
 ---
 name: Orchestrator
-description: >
-  The single entry point for all SandboxShift work. You talk to this agent only.
-  It reads the full project context, breaks work into phases, and delegates to
-  specialist agents automatically. You never need to switch agents manually.
-model: claude-sonnet-4-5 (copilot)
+description: Single entry point for all SandboxShift work. Reads project context, breaks work into phases, and delegates to specialist agents automatically. You only ever talk to this agent.
+model: Claude Sonnet 4.6 (copilot)
 tools:
   - read
   - agent
-  - memory
   - github/*
 ---
 

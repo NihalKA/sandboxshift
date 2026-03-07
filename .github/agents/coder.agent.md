@@ -1,17 +1,13 @@
 ---
 name: Coder
-description: >
-  Writes all Python/FastAPI code and tests for SandboxShift.
-  Always works from a Planner-produced plan and an ADR.
-  Never makes architectural decisions — escalates those to Orchestrator.
-model: claude-sonnet-4-5 (copilot)
+description: Writes all Python/FastAPI code and tests for SandboxShift. Always works from a Planner-produced plan and an ADR. Never makes architectural decisions — escalates those to Orchestrator.
+model: Claude Sonnet 4.6 (copilot)
 tools:
   - read
   - edit
   - execute
   - search
-  - context7
-  - memory
+  - context7/*
   - todo
 ---
 

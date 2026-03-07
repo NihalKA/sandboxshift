@@ -10,19 +10,20 @@ Follow every step in order. Takes about 15 minutes.
 - VS Code **1.96 or later** — [download](https://code.visualstudio.com/)
 - GitHub account with **Copilot Pro** subscription
 - Git installed
-- Node.js 18+ installed (needed for MCP servers)
 
 ---
 
 ## Step 1 — Install VS Code Extensions
 
-Open VS Code, go to Extensions (`Ctrl+Shift+X`) and install:
+Open VS Code, go to Extensions (`Cmd+Shift+X` on Mac, `Ctrl+Shift+X` on Windows) and install:
 
 | Extension | Publisher | Why |
 |-----------|-----------|-----|
-| GitHub Copilot | GitHub | Core AI |
-| GitHub Copilot Chat | GitHub | Agent mode UI |
+| GitHub Copilot Chat | GitHub | Agent mode UI + core AI (includes everything) |
 | GitHub Pull Requests | GitHub | For cloud agent later |
+
+> **Note:** You only need **GitHub Copilot Chat** — it now includes everything.
+> There is no separate "GitHub Copilot" extension required.
 
 Verify Copilot is working:
 - Bottom status bar should show the Copilot icon (not crossed out)
@@ -32,12 +33,12 @@ Verify Copilot is working:
 
 ## Step 2 — Enable Agent Mode
 
-1. Open VS Code Settings (`Ctrl+,`)
+1. Open VS Code Settings (`Cmd+,` on Mac, `Ctrl+,` on Windows)
 2. Search: `chat.agent.enabled`
 3. Set to `true`
 
 Then verify:
-1. Open Copilot Chat (`Ctrl+Shift+I`)
+1. Open Copilot Chat (`Cmd+Shift+I` on Mac, `Ctrl+Shift+I` on Windows)
 2. At the bottom of the chat panel, click the mode dropdown
 3. You should see **"Agent"** as an option
 
@@ -46,7 +47,7 @@ Then verify:
 ## Step 3 — Clone The Repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/sandboxshift.git
+git clone https://github.com/NihalKA/sandboxshift.git
 cd sandboxshift
 code .
 ```
@@ -64,129 +65,168 @@ You should now see your custom agents listed:
 🔒 Security
 ```
 
-If you don't see them yet — close and reopen VS Code, then check again.
+If you don't see them — close and reopen VS Code, then check again.
 
 ---
 
-## Step 4 — Install context7 MCP Server
+## Step 4 — Configure MCP Servers
 
-The Planner and Coder agents use context7 to look up live documentation.
-Without this, they will fail when trying to verify library APIs.
+Both MCP servers use hosted HTTP endpoints.
+No npm installs, no API keys, no tokens required.
+GitHub authenticates via your existing Copilot OAuth login automatically.
 
-```bash
-# Install context7 MCP globally
-npm install -g @context7/mcp-server
+### Option A — MCP User Config File (Recommended)
+
+VS Code has a dedicated MCP config file separate from settings.json.
+
+Open it:
+```
+Cmd+Shift+P → type "MCP: Open User Configuration" → Enter
 ```
 
-Now register it in VS Code:
+This opens a file at:
+```
+~/Library/Application Support/Code/User/mcp.json
+```
 
-1. Open VS Code Settings (`Ctrl+,`)
-2. Search: `mcp`
-3. Click **"Edit in settings.json"**
-4. Add this inside the JSON:
+Paste this:
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "context7": {
-        "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp@latest"]
-      }
+  "servers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
     }
-  }
+  },
+  "inputs": []
 }
 ```
 
-5. Save the file
-6. Restart VS Code
+Save the file.
 
-Verify context7 is working:
-1. Open Copilot Chat in agent mode
-2. Type: `#context7 what is the latest fastapi version?`
-3. It should return live documentation — not a cached answer
+### Start The Servers
 
----
+After saving, VS Code shows inline buttons above each server:
 
-## Step 5 — Configure GitHub MCP Server
-
-The Orchestrator uses GitHub MCP to create issues when it gets blocked
-and you're away. This is what sends you email notifications.
-
-```bash
-# Install GitHub MCP server
-npm install -g @modelcontextprotocol/server-github
+```
+"github":   ▷ Start | 40 tools | 2 prompts | More...
+"context7": ▷ Start | 2 tools | More...
 ```
 
-You need a GitHub Personal Access Token:
+Click **▷ Start** on each server.
 
-1. Go to GitHub → Settings → Developer Settings → Personal Access Tokens → Fine-grained tokens
-2. Click **"Generate new token"**
-3. Set:
-   - **Token name:** `sandboxshift-agents`
-   - **Expiration:** 90 days
-   - **Repository access:** Only select `sandboxshift`
-   - **Permissions:**
-     - Issues: Read and Write
-     - Pull requests: Read and Write
-     - Contents: Read and Write
-4. Click **"Generate token"**
-5. Copy the token — you won't see it again
+- **GitHub** will trigger an OAuth popup — sign in with your GitHub account.
+  No token needed. It uses your Copilot login.
+- **context7** starts immediately — no auth required.
 
-Now add it to VS Code settings.json (same file as before):
+Once started you'll see:
+```
+"github":   ✓ Running | Stop | Restart | 40 tools | 2 prompts
+"context7": ✓ Running | Stop | Restart | 2 tools
+```
+
+Both running = you're ready. ✅
+
+### Option B — Via settings.json (Alternative)
+
+If Option A doesn't work, add to `settings.json` instead:
+```
+Cmd+Shift+P → "Open User Settings JSON"
+```
 
 ```json
 {
   "mcp": {
     "servers": {
-      "context7": {
-        "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp@latest"]
-      },
       "github": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-github"],
-        "env": {
-          "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_TOKEN_HERE"
-        }
+        "type": "http",
+        "url": "https://api.githubcopilot.com/mcp/"
+      },
+      "context7": {
+        "type": "http",
+        "url": "https://mcp.context7.com/mcp"
       }
     }
   }
 }
 ```
 
-> ⚠️ **Security note:** This token only has access to the sandboxshift repo.
-> Never commit settings.json — it's already in .gitignore.
+### What Each Server Does
 
-Restart VS Code after saving.
-
----
-
-## Step 6 — Configure GitHub Email Notifications
-
-Make sure you get emailed when the Orchestrator creates a blocked issue:
-
-1. Go to GitHub → Settings → Notifications
-2. Under **"Participating and @mentions"** → enable Email
-3. Under **"Issues"** → enable Email
-4. Verify your email is confirmed in GitHub Settings → Emails
-
-Now when the Orchestrator creates an issue labelled `needs-human-decision`,
-you'll get an email. Reply to the email or comment on the issue — the agent
-will pick up your reply and continue.
+| Server | Used By | Does |
+|--------|---------|------|
+| context7 | Planner, Coder | Fetches live library docs — agents never use stale knowledge |
+| github | Orchestrator | Creates blocked issues when you're away, OAuth via Copilot login |
 
 ---
 
-## Step 7 — Verify Everything Works
+## Step 5 — Configure GitHub Email Notifications
 
-Run the test prompt from `TEST-AGENT.md` to verify the full chain works
-before throwing real work at it.
+This is what notifies you on your phone when an agent is blocked
+and needs your input while your screen is locked.
+
+### Correct Location
+
+Go to your **personal** GitHub settings — not the repo settings:
+
+```
+github.com → click your profile picture (top right)
+→ Settings
+→ Notifications (left sidebar)
+```
+
+Direct URL: **https://github.com/settings/notifications**
+
+### What To Check
+
+You need three things enabled:
+
+**1. Watching → Notify me: Email**
+```
+Subscriptions section
+→ Watching
+→ Notify me: Email ✅
+```
+
+**2. Participating, @mentions and custom → Notify me: Email**
+```
+Subscriptions section
+→ Participating, @mentions and custom
+→ Notify me: Email ✅
+```
+
+**3. Customize email updates → make sure Issues is checked**
+```
+→ Click the "Reviews, Pushes, Comments" dropdown
+→ Make sure Issues is checked ✅
+```
+
+This third step ensures you get emailed when someone (or an agent)
+comments on an issue — not just when it's first created.
+
+### How It Works
+
+When the Orchestrator creates a blocked issue:
+- Issue is created with label `needs-human-decision`
+- You get an email to `er.nihalka@gmail.com` immediately
+- Reply to the email OR open the issue and comment directly
+- The agent picks up your reply and continues automatically
+
+---
+
+## Step 6 — Verify Everything Works
+
+Run the tests from `TEST-AGENT.md` before starting any real work.
 
 ```
 Open Copilot Chat
 → Select "Orchestrator" from agent dropdown
-→ Paste the test prompt from TEST-AGENT.md
-→ Watch it run
+→ Follow TEST-AGENT.md step by step
 ```
 
 ---
@@ -194,29 +234,27 @@ Open Copilot Chat
 ## Troubleshooting
 
 ### Agents not showing in dropdown
-- Confirm files are in `.github/agents/` (exact path)
+- Confirm files are in `.github/agents/` — exact path matters
 - Confirm VS Code version is 1.96+
 - Close and fully reopen VS Code
-- Check the agent file frontmatter has `name:` and `model:` fields
+- Check each agent file has `name:` and `model:` in the frontmatter
 
 ### context7 not working
-- Run `npx -y @upstash/context7-mcp@latest` manually to check for errors
-- Make sure Node.js 18+ is installed: `node --version`
+- Try opening Copilot Chat in agent mode and typing: `#context7 latest fastapi version`
+- If it fails, fall back to npx approach — add this to settings.json instead:
+  ```json
+  "context7": {
+    "command": "npx",
+    "args": ["-y", "@upstash/context7-mcp@latest"]
+  }
+  ```
+  This requires Node.js 18+: verify with `node --version`
 
 ### GitHub MCP not creating issues
-- Verify your token has Issues: Read and Write permission
-- Check the token hasn't expired
-- Test manually: open Copilot Chat and type `@github list my repos`
+- GitHub MCP authenticates via your Copilot login automatically
+- If it fails, test with: open Copilot Chat and ask `@github list my repos`
+- Make sure you're signed into GitHub in VS Code
 
 ### Agent mode not visible
 - Search `chat.agent.enabled` in settings — must be `true`
-- Make sure GitHub Copilot Chat extension (not just Copilot) is installed
-
----
-
-## What Each MCP Server Does
-
-| Server | Used By | Does |
-|--------|---------|------|
-| context7 | Planner, Coder | Fetches live library docs so agents don't use stale knowledge |
-| github | Orchestrator | Creates blocked issues, reads issue replies, creates PRs |
+- Make sure GitHub Copilot Chat extension is installed and you're signed in

@@ -1,15 +1,11 @@
 ---
 name: Docs
-description: >
-  Writes all documentation for SandboxShift — README, getting started guides,
-  API reference, configuration docs, and inline docstrings. Only runs after
-  Reviewer has approved an implementation. Never documents things that don't exist yet.
-model: gemini-2.0-flash (copilot)
+description: Writes all documentation for SandboxShift including README, guides, API reference, and inline docstrings. Only runs after Reviewer approves. Never documents things that don't exist yet.
+model: Gemini 3 Flash (Preview)
 tools:
   - read
   - edit
   - search
-  - memory
 ---
 
 You write documentation. You do not write code.
