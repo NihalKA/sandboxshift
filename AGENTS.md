@@ -173,6 +173,7 @@ V3: Enterprises in regulated industries (banks, hospitals, defense)
 sandboxshift/
 ├── AGENTS.md                    ← this file (shared agent brain)
 ├── README.md                    ← user-facing docs
+├── pyproject.toml               ← project metadata + dev dependencies
 ├── sandboxshift.yaml            ← example config
 ├── .github/
 │   ├── agents/                  ← custom agent definitions
@@ -185,18 +186,28 @@ sandboxshift/
 │       └── blocked.md           ← agent raises issues here when blocked
 ├── architecture/                ← ADRs and system design docs
 │   └── decisions/
+│       ├── ADR-001-system-architecture.md
+│       └── ADR-002-sensitivity-scanner.md
 ├── src/
 │   ├── api/                     ← FastAPI endpoints
 │   ├── sandbox/                 ← core sandbox logic
 │   │   ├── runtime/             ← podman, gvisor, fargate adapters
 │   │   ├── burst/               ← burst decision engine
-│   │   └── detection/           ← sensitive data detection
+│   │   └── detection/           ← sensitive data detection ✓ BUILT
+│   │       ├── __init__.py
+│   │       └── sensitivity.py
 │   ├── observability/           ← audit trail, metrics
 │   └── cli/                     ← sandboxshift CLI
 ├── terraform/                   ← AWS infrastructure
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
+│   └── sandbox/
+│       └── detection/           ← SensitivityScanner tests ✓ BUILT
+│           └── test_sensitivity.py
 └── docs/
+    ├── index.md
+    └── components/
+        └── sensitivity-scanner.md
 ```
 
 ---
@@ -208,7 +219,7 @@ sandboxshift/
 - [ ] Podman sandbox adapter (local mode)
 - [ ] Burst decision engine (RAM check → local or cloud)
 - [ ] AWS Fargate adapter (cloud mode)
-- [ ] Sensitive data detection (Layer 1 + 2)
+- [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
 - [ ] Basic audit trail
 - [ ] Python CLI (sandboxshift run)
 - [ ] Pre-built runtime images (python, node, multi)
@@ -248,6 +259,9 @@ sandboxshift/
 | 6 | Sensitivity detection | 4-layer approach | Layered, explain decisions to user | 2026-03-07 |
 | 7 | IaC tool | Terraform | Nihal's existing experience | 2026-03-07 |
 | 8 | Project name | SandboxShift | Describes local/cloud shifting | 2026-03-07 |
+| 9 | SensitivityScanner fail behaviour | Fail-closed (OSError → FORCE_LOCAL) | Scan error must never silently allow cloud execution | 2026-03-08 |
+| 10 | .aws/.ssh detection strategy | Check parent dir components, not filename | rglob returns files only; directories themselves are never matched | 2026-03-08 |
+| 11 | Python project config | pyproject.toml (PEP 621) | Standard, ruff/mypy/pytest config in one place; no requirements.txt sprawl | 2026-03-08 |
 
 ---
 
