@@ -6,7 +6,9 @@ Two-layer sensitive-data scanner for SandboxShift (Security Layer 6 of 7).
 Layer 1 — File Pattern Matching
     Walks the workspace with rglob and checks every file name against a
     curated list of glob patterns that are likely to contain secrets
-    (e.g. .env, *.pem, credentials, .aws, .ssh …).
+    (e.g. .env, *.pem, credentials …).  Also inspects parent directory
+    components so that files nested inside .aws/ or .ssh/ are flagged
+    even though those directories are not files themselves.
 
 Layer 2 — Content Scanning
     Opens every text file that is small enough to read and scans its
@@ -19,6 +21,11 @@ Both layers are executed concurrently via asyncio.gather.  Results are
 merged into a single SensitivityResult that carries a machine-readable
 Recommendation (FORCE_LOCAL or ALLOW_CLOUD) and a human-readable
 explanation list.
+
+Fail-closed design: if the directory walk raises an OS-level error the
+scanner returns a sentinel Finding so the workspace is treated as
+sensitive and forced to run locally.  Scan errors must NEVER produce
+ALLOW_CLOUD.
 
 The scanner is intentionally synchronous-I/O-free: all blocking
 filesystem operations are delegated to asyncio.to_thread so the whole
@@ -60,7 +67,7 @@ class Finding:
     file: Path
     pattern: str
     reason: str
-    match_value: str = ""
+    match_value: str = ""  # always redacted: first 6 chars + "***"
 
 
 @dataclass
@@ -70,21 +77,29 @@ class SensitivityResult:
     recommendation: Recommendation = Recommendation.ALLOW_CLOUD
 
     def explain(self) -> List[str]:
-        """Return one human-readable string per finding."""
-        return [
-            f"[{f.layer.value}] {f.file.name}: {f.reason} (pattern: {f.pattern})"
-            for f in self.findings
-        ]
+        """
+        Return one human-readable string per finding, suitable for the audit log.
+
+        Includes the full file path (not just filename) for unambiguous audit records,
+        and the redacted match_value when available.
+        """
+        lines: List[str] = []
+        for f in self.findings:
+            evidence = f" [evidence: {f.match_value}]" if f.match_value else ""
+            lines.append(
+                f"[{f.layer.value}] {f.file}: {f.reason} (pattern: {f.pattern}){evidence}"
+            )
+        return lines
 
 
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-MAX_FILE_SIZE_BYTES = 1_048_576  # 1 MB
-BINARY_PROBE_SIZE = 8192  # 8 KB
+MAX_FILE_SIZE_BYTES = 1_048_576  # 1 MB — larger files skipped in content scan
+BINARY_PROBE_SIZE = 8192  # 8 KB — probe window for binary detection
 
-# (pattern_glob, reason) tuples
+# (pattern_glob, reason) tuples — matched against file names only
 SENSITIVE_FILE_PATTERNS: list[tuple[str, str]] = [
     (".env", "Environment variable file may contain secrets"),
     ("*.env", "Environment variable file may contain secrets"),
@@ -95,11 +110,16 @@ SENSITIVE_FILE_PATTERNS: list[tuple[str, str]] = [
     ("credentials.json", "GCP/OAuth credentials file"),
     ("*secret*", "Filename contains 'secret'"),
     ("*token*", "Filename contains 'token'"),
-    (".aws", "AWS configuration directory"),
-    (".ssh", "SSH key directory"),
 ]
 
-# (compiled_regex, pattern_string, reason) tuples
+# (pattern_glob, reason) tuples — matched against each parent directory component
+# This catches files *inside* .aws/ or .ssh/ even though those are not files.
+SENSITIVE_DIR_COMPONENTS: list[tuple[str, str]] = [
+    (".aws", "File is inside the AWS configuration directory (.aws/)"),
+    (".ssh", "File is inside the SSH key directory (.ssh/)"),
+]
+
+# (compiled_regex, pattern_string, reason) tuples — all compiled once at module load
 SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (
         re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -138,6 +158,23 @@ SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     ),
 ]
 
+# Sentinel Finding injected when directory traversal fails (fail-closed design).
+# When the scanner cannot walk the workspace it must not return ALLOW_CLOUD.
+_WALK_ERROR_REASON = (
+    "Directory traversal failed — treating workspace as sensitive (fail-safe). "
+    "Ensure the workspace is readable before re-running."
+)
+
+
+def _make_walk_error_finding(workspace: Path, layer: DetectionLayer) -> Finding:
+    return Finding(
+        layer=layer,
+        file=workspace,
+        pattern="<walk-error>",
+        reason=_WALK_ERROR_REASON,
+        match_value="",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Scanner
@@ -148,11 +185,15 @@ class SensitivityScanner:
     """
     Two-layer sensitive data scanner (Security Layer 6 of 7).
 
-    Layer 1 - File Pattern Matching: flags files by name/glob
-    Layer 2 - Content Scanning: flags files by content regex
+    Layer 1 — File Pattern Matching: flags files by name/glob and parent dir
+    Layer 2 — Content Scanning: flags files by content regex
 
-    Both layers run concurrently. Results are merged.
-    The scanner always runs before BurstEngine.
+    Both layers run concurrently via asyncio.gather. Results are merged.
+
+    Fail-closed: any OS error during directory traversal is treated as a
+    sensitivity signal and produces FORCE_LOCAL, never ALLOW_CLOUD.
+
+    The scanner must always run before BurstEngine.
     """
 
     async def scan(self, workspace: Path, policy: Any = None) -> SensitivityResult:
@@ -160,7 +201,7 @@ class SensitivityScanner:
         Scan workspace for sensitive data.
 
         Args:
-            workspace: Path to directory to scan.
+            workspace: Path to the directory to scan.
             policy: Ignored in V1. V2: policy-file enforcement not yet implemented.
 
         Returns:
@@ -193,7 +234,7 @@ class SensitivityScanner:
         )
 
     async def _scan_file_patterns(self, workspace: Path) -> list[Finding]:
-        """Layer 1: scan file names against sensitive glob patterns."""
+        """Layer 1: scan file names and parent directories against sensitive patterns."""
 
         # TODO(V2): rglob follows symlinks — add symlink containment check
         def _walk() -> list[Path]:
@@ -202,12 +243,14 @@ class SensitivityScanner:
         try:
             all_files = await asyncio.to_thread(_walk)
         except OSError:
-            return []
+            # Fail-closed: cannot traverse → treat workspace as sensitive
+            return [_make_walk_error_finding(workspace, DetectionLayer.FILE_PATTERN)]
 
         findings: list[Finding] = []
         for file_path in all_files:
-            for glob_pattern, reason in SENSITIVE_FILE_PATTERNS:
-                try:
+            try:
+                # Check file name against sensitive file patterns
+                for glob_pattern, reason in SENSITIVE_FILE_PATTERNS:
                     if fnmatch.fnmatch(file_path.name, glob_pattern):
                         findings.append(
                             Finding(
@@ -218,8 +261,28 @@ class SensitivityScanner:
                                 match_value="",
                             )
                         )
-                except (PermissionError, OSError):
-                    continue
+
+                # Check each parent directory component against sensitive dir patterns.
+                # This catches files inside .aws/ and .ssh/ which are directories, not files.
+                try:
+                    rel_parts = file_path.relative_to(workspace).parts[:-1]
+                except ValueError:
+                    rel_parts = ()
+                for part in rel_parts:
+                    for dir_pattern, dir_reason in SENSITIVE_DIR_COMPONENTS:
+                        if fnmatch.fnmatch(part, dir_pattern):
+                            findings.append(
+                                Finding(
+                                    layer=DetectionLayer.FILE_PATTERN,
+                                    file=file_path,
+                                    pattern=dir_pattern,
+                                    reason=dir_reason,
+                                    match_value="",
+                                )
+                            )
+
+            except (PermissionError, OSError):
+                continue
 
         return findings
 
@@ -233,7 +296,8 @@ class SensitivityScanner:
         try:
             all_files = await asyncio.to_thread(_walk)
         except OSError:
-            return []
+            # Fail-closed: cannot traverse → treat workspace as sensitive
+            return [_make_walk_error_finding(workspace, DetectionLayer.CONTENT_SCAN)]
 
         findings: list[Finding] = []
 
@@ -241,6 +305,8 @@ class SensitivityScanner:
             try:
                 stat = await asyncio.to_thread(file_path.stat)
                 if stat.st_size > MAX_FILE_SIZE_BYTES:
+                    # Large files are skipped in content scan (OOM protection).
+                    # File-pattern scan still runs for these files (Layer 1).
                     continue
 
                 # Binary detection: try to decode first BINARY_PROBE_SIZE bytes as UTF-8
@@ -252,7 +318,7 @@ class SensitivityScanner:
                 try:
                     probe.decode("utf-8")
                 except UnicodeDecodeError:
-                    continue  # binary file — skip
+                    continue  # binary file — skip content scan
 
                 # Read full content as text
                 def _read_text() -> str:
@@ -263,6 +329,8 @@ class SensitivityScanner:
                 for compiled_re, pattern_str, reason in SENSITIVE_CONTENT_PATTERNS:
                     for match in compiled_re.finditer(content):
                         raw = match.group()
+                        # Always redact: expose only first 6 chars to help audit trail
+                        # without leaking actual secret values.
                         redacted = raw[:6] + "***" if len(raw) > 6 else raw[:3] + "***"
                         findings.append(
                             Finding(
