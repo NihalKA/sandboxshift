@@ -27,7 +27,6 @@ module stays non-blocking inside an async event loop.
 
 import asyncio
 import fnmatch
-import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -196,12 +195,13 @@ class SensitivityScanner:
     async def _scan_file_patterns(self, workspace: Path) -> list[Finding]:
         """Layer 1: scan file names against sensitive glob patterns."""
 
+        # TODO(V2): rglob follows symlinks — add symlink containment check
         def _walk() -> list[Path]:
             return [p for p in workspace.rglob("*") if p.is_file()]
 
         try:
             all_files = await asyncio.to_thread(_walk)
-        except PermissionError:
+        except OSError:
             return []
 
         findings: list[Finding] = []
@@ -226,12 +226,13 @@ class SensitivityScanner:
     async def _scan_content(self, workspace: Path) -> list[Finding]:
         """Layer 2: scan file contents against sensitive regex patterns."""
 
+        # TODO(V2): rglob follows symlinks — add symlink containment check
         def _walk() -> list[Path]:
             return [p for p in workspace.rglob("*") if p.is_file()]
 
         try:
             all_files = await asyncio.to_thread(_walk)
-        except PermissionError:
+        except OSError:
             return []
 
         findings: list[Finding] = []
