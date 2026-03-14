@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import sandboxshift.cli.main as _cli_main_module  # module object for monkeypatch targets
+# importlib.import_module goes through sys.modules and returns the actual
+# submodule even when sandboxshift/cli/__init__.py shadows the name with
+# `from .main import main` (which sets sandboxshift.cli.main = <function>).
+_cli_main_module = importlib.import_module("sandboxshift.cli.main")
+
 from sandboxshift.cli.main import (
     _build_parser,
     _validate_workspace,
@@ -154,9 +159,8 @@ def test_run_sensitive_workspace_exits_1(tmp_path, monkeypatch, capsys):
     asyncio.run() / event-loop interaction with pytest-asyncio's auto mode.
     The logic being tested belongs entirely to _validate_workspace.
 
-    Uses the module object (_cli_main_module) instead of a dotted string so
-    monkeypatch resolves _SENSITIVE_ROOTS on the submodule rather than on the
-    'main' function re-exported from sandboxshift.cli.__init__.
+    Uses importlib.import_module to get the actual submodule object rather than
+    the 'main' function that __init__.py shadows sandboxshift.cli.main with.
     """
     sensitive_dir = tmp_path / "fake_aws"
     sensitive_dir.mkdir()
