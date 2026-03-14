@@ -188,23 +188,32 @@ sandboxshift/
 │   └── decisions/
 │       ├── ADR-001-system-architecture.md
 │       ├── ADR-002-sensitivity-scanner.md
-│       └── ADR-003-burst-engine.md
+│       ├── ADR-003-burst-engine.md
+│       └── ADR-004-podman-runtime.md
 ├── src/
+│   ├── config.py                ← SandboxConfig dataclass (shared by all runtimes)
 │   ├── api/                     ← FastAPI endpoints
+│   ├── observability/           ← audit trail, metrics
+│   │   ├── __init__.py
+│   │   └── audit.py             ← AuditLogger (V1 stub; replaced in Prompt 6)
 │   ├── sandbox/                 ← core sandbox logic
-│   │   ├── runtime/             ← podman, gvisor, fargate adapters
+│   │   ├── runtime/             ← podman, gvisor, fargate adapters ✓ BUILT (podman)
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py          ← Runtime ABC + TaskResult
+│   │   │   └── podman.py        ← PodmanRuntime ✓ BUILT
 │   │   ├── burst/               ← burst decision engine ✓ BUILT
 │   │   │   ├── __init__.py
 │   │   │   └── engine.py
 │   │   └── detection/           ← sensitive data detection ✓ BUILT
 │   │       ├── __init__.py
 │   │       └── sensitivity.py
-│   ├── observability/           ← audit trail, metrics
 │   └── cli/                     ← sandboxshift CLI
 ├── terraform/                   ← AWS infrastructure
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
 │   └── sandbox/
+│       ├── runtime/             ← PodmanRuntime tests ✓ BUILT
+│       │   └── test_podman.py
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
@@ -213,6 +222,7 @@ sandboxshift/
     ├── index.md
     └── components/
         ├── burst-engine.md
+        ├── podman-runtime.md
         └── sensitivity-scanner.md
 ```
 
@@ -222,7 +232,7 @@ sandboxshift/
 
 ### Phase 1 — V1 (Current Focus)
 - [ ] Core FastAPI server
-- [ ] Podman sandbox adapter (local mode)
+- [x] Podman sandbox adapter (local mode) — **COMPLETE** (2026-03-14)
 - [x] Burst decision engine (RAM check → local or cloud) — **COMPLETE** (2026-03-14)
 - [ ] AWS Fargate adapter (cloud mode)
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
@@ -273,6 +283,11 @@ sandboxshift/
 | 14 | BurstDecision mutability | frozen=True dataclass | Prevents post-decision tampering; safe to pass across coroutines | 2026-03-14 |
 | 15 | BurstEngine RAM failure behaviour | Fail-closed (RuntimeError → mode=local, confidence=forced) | Unknown RAM state must never allow cloud execution | 2026-03-14 |
 | 16 | Default RAM threshold | 4 GB (configurable at BurstEngine construction time) | Sufficient for typical Python/Node agent sandbox on 8 GB developer machine | 2026-03-14 |
+| 17 | PodmanRuntime subprocess interface | stdlib subprocess (not podman-py) | Zero dependencies; trivially mockable in tests; CLI is transparent and auditable | 2026-03-14 |
+| 18 | PodmanRuntime network policy | slirp4netns + --dns=none + pre-resolved --add-host | Only rootless-compatible option; DNS blocked at container level; IPs resolved once at provision time | 2026-03-14 |
+| 19 | PodmanRuntime image selection | Workspace marker auto-detection (_detect_image) | Zero-config UX; multiple markers → runtime-multi; no user-supplied image override | 2026-03-14 |
+| 20 | AuditLogger V1 | No-op stub in src/observability/audit.py | Placeholder for real implementation in Prompt 6 (basic audit trail); all callers already wired | 2026-03-14 |
+| 21 | Shared config dataclass | SandboxConfig in src/config.py | Single source of truth for all runtimes (PodmanRuntime, FargateRuntime, SandboxManager) | 2026-03-14 |
 
 ---
 
