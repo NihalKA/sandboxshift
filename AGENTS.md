@@ -187,12 +187,15 @@ sandboxshift/
 ├── architecture/                ← ADRs and system design docs
 │   └── decisions/
 │       ├── ADR-001-system-architecture.md
-│       └── ADR-002-sensitivity-scanner.md
+│       ├── ADR-002-sensitivity-scanner.md
+│       └── ADR-003-burst-engine.md
 ├── src/
 │   ├── api/                     ← FastAPI endpoints
 │   ├── sandbox/                 ← core sandbox logic
 │   │   ├── runtime/             ← podman, gvisor, fargate adapters
-│   │   ├── burst/               ← burst decision engine
+│   │   ├── burst/               ← burst decision engine ✓ BUILT
+│   │   │   ├── __init__.py
+│   │   │   └── engine.py
 │   │   └── detection/           ← sensitive data detection ✓ BUILT
 │   │       ├── __init__.py
 │   │       └── sensitivity.py
@@ -202,11 +205,14 @@ sandboxshift/
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
 │   └── sandbox/
+│       ├── burst/               ← BurstEngine tests ✓ BUILT
+│       │   └── test_engine.py
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
 │           └── test_sensitivity.py
 └── docs/
     ├── index.md
     └── components/
+        ├── burst-engine.md
         └── sensitivity-scanner.md
 ```
 
@@ -217,7 +223,7 @@ sandboxshift/
 ### Phase 1 — V1 (Current Focus)
 - [ ] Core FastAPI server
 - [ ] Podman sandbox adapter (local mode)
-- [ ] Burst decision engine (RAM check → local or cloud)
+- [x] Burst decision engine (RAM check → local or cloud) — **COMPLETE** (2026-03-14)
 - [ ] AWS Fargate adapter (cloud mode)
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
 - [ ] Basic audit trail
@@ -262,6 +268,11 @@ sandboxshift/
 | 9 | SensitivityScanner fail behaviour | Fail-closed (OSError → FORCE_LOCAL) | Scan error must never silently allow cloud execution | 2026-03-08 |
 | 10 | .aws/.ssh detection strategy | Check parent dir components, not filename | rglob returns files only; directories themselves are never matched | 2026-03-08 |
 | 11 | Python project config | pyproject.toml (PEP 621) | Standard, ruff/mypy/pytest config in one place; no requirements.txt sprawl | 2026-03-08 |
+| 12 | BurstEngine FORCE_LOCAL enforcement | BurstEngine enforces it (not SandboxManager) | Single point of enforcement; testable and auditable in isolation | 2026-03-14 |
+| 13 | RAM reading library | psutil.virtual_memory().available | Cross-platform (Linux + macOS); .available is correct metric (not .total or .free) | 2026-03-14 |
+| 14 | BurstDecision mutability | frozen=True dataclass | Prevents post-decision tampering; safe to pass across coroutines | 2026-03-14 |
+| 15 | BurstEngine RAM failure behaviour | Fail-closed (RuntimeError → mode=local, confidence=forced) | Unknown RAM state must never allow cloud execution | 2026-03-14 |
+| 16 | Default RAM threshold | 4 GB (configurable at BurstEngine construction time) | Sufficient for typical Python/Node agent sandbox on 8 GB developer machine | 2026-03-14 |
 
 ---
 
