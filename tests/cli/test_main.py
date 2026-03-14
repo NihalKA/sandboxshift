@@ -147,12 +147,18 @@ def test_run_nonexistent_workspace_exits_1(tmp_path, capsys):
 
 
 def test_run_sensitive_workspace_exits_1(tmp_path, monkeypatch, capsys):
+    """Workspace inside a sensitive root must exit 1 with a 'protected' message.
+
+    Calls _validate_workspace() directly rather than main() to avoid any
+    asyncio.run() / event-loop interaction with pytest-asyncio's auto mode.
+    The logic being tested belongs entirely to _validate_workspace.
+    """
     sensitive_dir = tmp_path / "fake_aws"
     sensitive_dir.mkdir()
+    # Patch the module-level tuple so only our temp dir is treated as sensitive.
     monkeypatch.setattr("sandboxshift.cli.main._SENSITIVE_ROOTS", (sensitive_dir,))
-    with patch("sys.argv", ["sandboxshift", "run", str(sensitive_dir), "ls"]):
-        with pytest.raises(SystemExit) as exc_info:
-            main()
+    with pytest.raises(SystemExit) as exc_info:
+        _validate_workspace(str(sensitive_dir))
     assert exc_info.value.code == 1
     assert "protected" in capsys.readouterr().err
 
