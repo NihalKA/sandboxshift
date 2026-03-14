@@ -157,6 +157,48 @@ def test_run_sensitive_workspace_exits_1(tmp_path, monkeypatch, capsys):
     assert "protected" in capsys.readouterr().err
 
 
+def test_allow_bare_ip_rejected_exits_1(workspace, capsys):
+    """--allow with a bare IPv4 address must be rejected (Layer 4 SSRF guard)."""
+    with patch("sys.argv", ["sandboxshift", "run", str(workspace), "pytest",
+                             "--allow", "10.0.0.1"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    assert "IP" in capsys.readouterr().err
+
+
+def test_allow_imds_ip_rejected_exits_1(workspace, capsys):
+    """--allow with IMDS address 169.254.169.254 must be rejected."""
+    with patch("sys.argv", ["sandboxshift", "run", str(workspace), "pytest",
+                             "--allow", "169.254.169.254"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    assert "IP" in capsys.readouterr().err
+
+
+def test_memory_mb_over_limit_exits_1(workspace, capsys):
+    """--memory-mb exceeding 65536 must be rejected to prevent host OOM."""
+    with patch("sys.argv", ["sandboxshift", "run", str(workspace), "pytest",
+                             "--memory-mb", "999999"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "memory-mb" in err
+
+
+def test_cpu_over_limit_exits_1(workspace, capsys):
+    """--cpu exceeding 64.0 must be rejected to prevent host resource exhaustion."""
+    with patch("sys.argv", ["sandboxshift", "run", str(workspace), "pytest",
+                             "--cpu", "128.0"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "cpu" in err
+
+
 # ---------------------------------------------------------------------------
 # Group 3 — Config args passed correctly
 # ---------------------------------------------------------------------------

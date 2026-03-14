@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +44,17 @@ _FARGATE_ENV_VARS: list[str] = [
     "FARGATE_REGION",
 ]
 
+# FQDN regex: requires at least two labels separated by dots.
+_FQDN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?)+$",
+    re.IGNORECASE,
+)
+
+_MEMORY_MB_MIN = 128
+_MEMORY_MB_MAX = 65536
+_CPU_MIN = 0.25
+_CPU_MAX = 64.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,6 +80,33 @@ def _validate_workspace(workspace_str: str) -> Path:
         except Exception:  # noqa: BLE001
             pass
     return resolved
+
+
+def _validate_allow_hosts(hosts: list[str]) -> None:
+    """Reject bare IP addresses and non-FQDN values in --allow.
+
+    Mirrors the validation in src/api/models.py to protect CLI users who
+    bypass the API layer. Prevents SSRF against AWS IMDS (169.254.169.254)
+    and internal services reachable from the sandbox network.
+    """
+    for host in hosts:
+        # Reject bare IP addresses outright (IPv4 and IPv6).
+        try:
+            ipaddress.ip_address(host)
+            print(
+                f"Error: --allow does not accept IP addresses: {host!r}. Use FQDNs only.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except ValueError:
+            pass
+        # Require a valid FQDN (at least two dot-separated labels).
+        if not _FQDN_RE.match(host):
+            print(
+                f"Error: --allow requires a valid fully-qualified domain name: {host!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
@@ -123,7 +163,29 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
+    # Validate workspace path.
     workspace = _validate_workspace(args.workspace)
+
+    # Validate --memory-mb bounds.
+    if not (_MEMORY_MB_MIN <= args.memory_mb <= _MEMORY_MB_MAX):
+        print(
+            f"Error: --memory-mb must be between {_MEMORY_MB_MIN} and {_MEMORY_MB_MAX}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Validate --cpu bounds.
+    if not (_CPU_MIN <= args.cpu <= _CPU_MAX):
+        print(
+            f"Error: --cpu must be between {_CPU_MIN} and {_CPU_MAX}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Validate --allow FQDN-only (rejects bare IPs including IMDS 169.254.169.254).
+    if args.allow:
+        _validate_allow_hosts(args.allow)
+
     result = asyncio.run(_run_async(args, workspace))
     print(f"Runtime: {result.runtime_mode}")
     print(f"Duration: {result.duration_seconds:.2f}s")
