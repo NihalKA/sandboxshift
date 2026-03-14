@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
     "psutil>=5.9",
+    # PodmanRuntime: subprocess, asyncio, socket, time, uuid — all stdlib, no new deps
 ]
 
 [project.optional-dependencies]
