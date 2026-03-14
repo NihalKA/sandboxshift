@@ -198,6 +198,9 @@ sandboxshift/
 │   │   ├── models.py            ← RunRequest, RunResponse, HealthResponse, AuditEntry
 │   │   ├── routes.py            ← POST /run, GET /health, GET /audit
 │   │   └── app.py               ← create_app() factory with async lifespan wiring
+│   ├── cli/                     ← sandboxshift CLI ✓ BUILT
+│   │   ├── __init__.py          ← exports main
+│   │   └── main.py              ← argparse CLI: run + audit tail subcommands
 │   ├── observability/           ← audit trail, metrics
 │   │   ├── __init__.py
 │   │   └── audit.py             ← AuditLogger ✓ BUILT
@@ -215,7 +218,6 @@ sandboxshift/
 │   │   └── detection/           ← sensitive data detection ✓ BUILT
 │   │       ├── __init__.py
 │   │       └── sensitivity.py
-│   └── cli/                     ← sandboxshift CLI
 ├── terraform/
 │   └── fargate/                 ← AWS infrastructure for FargateRuntime ✓ BUILT
 │       ├── main.tf              ← ECS cluster, task def, IAM, SG, CW log group
@@ -226,6 +228,9 @@ sandboxshift/
 │   ├── api/                     ← FastAPI layer tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_routes.py       ← 26 tests across 6 groups
+│   ├── cli/                     ← CLI tests ✓ BUILT
+│   │   ├── __init__.py
+│   │   └── test_main.py         ← 24 tests across 5 groups (incl. 4 security tests)
 │   ├── observability/           ← AuditLogger tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
@@ -259,7 +264,7 @@ sandboxshift/
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
 - [x] SandboxManager (orchestrator: scan → burst → runtime → provision/execute/destroy) — **COMPLETE** (2026-03-14)
 - [x] Basic audit trail — **COMPLETE** (2026-03-14)
-- [ ] Python CLI (sandboxshift run)
+- [x] Python CLI (sandboxshift run) — **COMPLETE** (2026-03-14)
 - [ ] Pre-built runtime images (python, node, multi)
 - [ ] Terraform for AWS setup
 - [ ] README and getting started docs
@@ -328,6 +333,13 @@ sandboxshift/
 | 37 | GET /audit JSONL parsing | Invalid lines silently skipped; missing file → empty list | Malformed log lines must never break the audit endpoint; degraded output is better than 500 | 2026-03-14 |
 | 38 | API workspace validation | Pydantic @field_validator: exists + resolves symlinks + rejects sensitive paths | Defence-in-depth at API boundary; SensitivityScanner is not the sole guard for path safety | 2026-03-14 |
 | 39 | API allowed_hosts validation | FQDN-only; bare IPs rejected; link-local + private ranges blocked | Prevents SSRF against IMDS (169.254.169.254) and internal services reachable from sandbox network | 2026-03-14 |
+| 40 | CLI argument parser | argparse (stdlib) — no Click, Typer, or Rich | Zero new runtime dependencies; ships with Python 3.11; no install friction for users | 2026-03-14 |
+| 41 | CLI Fargate wiring | Mirrors api/app.py exactly — same 6 env vars, same None-if-missing logic | Single mental model for operators; env var names documented in one place (AGENTS.md) | 2026-03-14 |
+| 42 | CLI audit log path resolution | Priority: --audit-log arg → SANDBOXSHIFT_AUDIT_LOG env var → ~/.sandboxshift/audit.log | Consistent with API layer default; env var allows CI override without code changes | 2026-03-14 |
+| 43 | CLI async entry point | Named coroutine _run_async() called via asyncio.run() in _cmd_run() | Keeps async surface testable with AsyncMock; hides event loop management from tests | 2026-03-14 |
+| 44 | CLI subcommand structure | argparse nested subparsers: sandboxshift {run, audit {tail}} | Extensible for future subcommands (audit export, config validate); matches POSIX conventions | 2026-03-14 |
+| 45 | CLI --allow validation | FQDN-only via _validate_allow_hosts(); bare IPs rejected at CLI boundary | CLI users bypass models.py — duplicate guard required to preserve Layer 4 for direct CLI execution | 2026-03-14 |
+| 46 | CLI --memory-mb / --cpu bounds | Post-parse validation: memory 128–65536 MB, cpu 0.25–64.0 | CLI users bypass models.py le= constraints; prevents crash-the-host via pathological cgroup values | 2026-03-14 |
 
 ---
 
