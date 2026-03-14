@@ -89,18 +89,18 @@ SandboxShift ships ready-made images. NO Dockerfile needed from users.
 ```
 sandboxshift/runtime-python:3.11
 sandboxshift/runtime-node:20
-sandboxshift/runtime-java:21
-sandboxshift/runtime-go:1.22
-sandboxshift/runtime-rust:latest
-sandboxshift/runtime-multi        ← python + node + go in one image
+sandboxshift/runtime-java:21       ← V2
+sandboxshift/runtime-go:1.22       ← V2
+sandboxshift/runtime-rust:latest   ← V2
+sandboxshift/runtime-multi         ← python + node in one image (V1)
 ```
 
-Auto-detection logic:
+Auto-detection logic (Decision #19):
 - Found requirements.txt → python runtime
 - Found package.json → node runtime
-- Found pom.xml / build.gradle → java runtime
-- Found go.mod → go runtime
 - Found multiple → multi runtime
+- pom.xml / build.gradle → java runtime (V2)
+- go.mod → go runtime (V2)
 
 ---
 
@@ -172,7 +172,7 @@ V3: Enterprises in regulated industries (banks, hospitals, defense)
 ```
 sandboxshift/
 ├── AGENTS.md                    ← this file (shared agent brain)
-├── README.md                    ← user-facing docs
+├── README.md                    ← user-facing docs ✓ BUILT
 ├── pyproject.toml               ← project metadata + dev dependencies
 ├── sandboxshift.yaml            ← example config
 ├── .github/
@@ -220,10 +220,22 @@ sandboxshift/
 │   │       └── sensitivity.py
 ├── terraform/
 │   └── fargate/                 ← AWS infrastructure for FargateRuntime ✓ BUILT
-│       ├── main.tf              ← ECS cluster, task def, IAM, SG, CW log group
+│       ├── main.tf              ← ECS cluster, task def, IAM, SG, CW log group, S3 bucket
 │       ├── variables.tf         ← all Terraform input variables
-│       └── outputs.tf           ← outputs matching FargateRuntime constructor params
-├── images/                      ← Chainguard-based runtime images
+│       ├── outputs.tf           ← outputs matching FargateRuntime constructor params
+│       └── README.md            ← prerequisites, quick start, env var wiring ✓ BUILT
+├── images/                      ← Chainguard-based runtime images ✓ BUILT
+│   ├── Makefile                 ← build-python, build-node, build-multi, push-all
+│   ├── README.md                ← image strategy, selection table, security properties
+│   ├── python/
+│   │   ├── Dockerfile           ← cgr.dev/chainguard/python:latest-dev
+│   │   └── README.md
+│   ├── node/
+│   │   ├── Dockerfile           ← cgr.dev/chainguard/node:latest-dev
+│   │   └── README.md
+│   └── multi/
+│       ├── Dockerfile           ← cgr.dev/chainguard/wolfi-base + python-3.11 + nodejs-20
+│       └── README.md
 ├── tests/
 │   ├── api/                     ← FastAPI layer tests ✓ BUILT
 │   │   ├── __init__.py
@@ -244,7 +256,9 @@ sandboxshift/
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
 │           └── test_sensitivity.py
 └── docs/
-    ├── index.md
+    ├── index.md                 ← component index ✓ BUILT
+    ├── getting-started.md       ← install → first run → cloud burst ✓ BUILT
+    ├── configuration.md         ← full sandboxshift.yaml + env var reference ✓ BUILT
     └── components/
         ├── burst-engine.md
         ├── podman-runtime.md
@@ -265,9 +279,11 @@ sandboxshift/
 - [x] SandboxManager (orchestrator: scan → burst → runtime → provision/execute/destroy) — **COMPLETE** (2026-03-14)
 - [x] Basic audit trail — **COMPLETE** (2026-03-14)
 - [x] Python CLI (sandboxshift run) — **COMPLETE** (2026-03-14)
-- [ ] Pre-built runtime images (python, node, multi)
-- [ ] Terraform for AWS setup
-- [ ] README and getting started docs
+- [x] Pre-built runtime images (python, node, multi) — **COMPLETE** (2026-03-14)
+- [x] Terraform for AWS setup — **COMPLETE** (2026-03-14)
+- [x] README and getting started docs — **COMPLETE** (2026-03-14)
+
+### **V1 IS COMPLETE.**
 
 ### Phase 2 — V2
 - [ ] gVisor integration
@@ -340,6 +356,8 @@ sandboxshift/
 | 44 | CLI subcommand structure | argparse nested subparsers: sandboxshift {run, audit {tail}} | Extensible for future subcommands (audit export, config validate); matches POSIX conventions | 2026-03-14 |
 | 45 | CLI --allow validation | FQDN-only via _validate_allow_hosts(); bare IPs rejected at CLI boundary | CLI users bypass models.py — duplicate guard required to preserve Layer 4 for direct CLI execution | 2026-03-14 |
 | 46 | CLI --memory-mb / --cpu bounds | Post-parse validation: memory 128–65536 MB, cpu 0.25–64.0 | CLI users bypass models.py le= constraints; prevents crash-the-host via pathological cgroup values | 2026-03-14 |
+| 47 | Runtime image Chainguard variant | :latest-dev for python/node (not distroless :latest) | PodmanRuntime runs /bin/sh -c <task>; distroless :latest has no shell and would fail every task; :latest-dev adds BusyBox (/bin/sh) + apk; network egress still controlled by PodmanRuntime allowlist (Decision #18) | 2026-03-14 |
+| 48 | Multi-runtime base image | cgr.dev/chainguard/wolfi-base + apk add python-3.11 nodejs-20 busybox | Wolfi is the upstream distro for all Chainguard images; single-layer apk install avoids fragile cross-image COPY --from; apk cache removed after install; V2 will strip apk from final layer via multi-stage build | 2026-03-14 |
 
 ---
 
