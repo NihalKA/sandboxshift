@@ -1,10 +1,10 @@
 """Tests for FargateRuntime.
 
-28 tests grouped into:
+29 tests grouped into:
   Group 1 — Constructor validation (3 tests)
   Group 2 — provision() (8 tests)
   Group 3 — execute() (10 tests)
-  Group 4 — destroy() (7 tests)
+  Group 4 — destroy() (8 tests)
 """
 
 from __future__ import annotations
@@ -505,4 +505,42 @@ async def test_destroy_records_audit_event(
     calls = [c.args[0] for c in mock_audit.record.call_args_list]
     destroy_events = [c for c in calls if c.get("event") == "destroy"]
     assert len(destroy_events) >= 1
+    assert destroy_events[0]["instance_id"] == instance_id
+
+
+async def test_destroy_audit_fires_even_when_delete_bucket_raises(
+    tmp_workspace, default_config, aws_clients, mock_to_thread, mock_sleep
+):
+    """Regression test for the finally-block fix.
+
+    Verifies that the audit event is emitted even when _delete_bucket() raises.
+    This guards against regressing the fix where audit was inside try/except
+    and could be silently dropped on cleanup failure (Security Layer 7).
+    """
+    mock_audit = MagicMock(spec=AuditLogger)
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    mock_s3.delete_bucket.side_effect = Exception("S3 bucket deletion failed")
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = iter([{"Contents": []}])
+    mock_s3.get_paginator.return_value = mock_paginator
+    rt = FargateRuntime(
+        cluster_arn="arn:cluster",
+        task_def_arn="arn:taskdef",
+        subnet_ids=["subnet-1"],
+        security_group_ids=["sg-1"],
+        region="us-east-1",
+        log_group="/lg",
+        audit_logger=mock_audit,
+    )
+    instance_id = await rt.provision(tmp_workspace, default_config)
+    mock_audit.reset_mock()
+    await rt.destroy(instance_id)  # delete_bucket raises — destroy must still not raise
+    # Audit MUST have fired from the finally block despite the exception
+    calls = [c.args[0] for c in mock_audit.record.call_args_list]
+    destroy_events = [c for c in calls if c.get("event") == "destroy"]
+    assert len(destroy_events) >= 1, (
+        "Audit event must fire from finally block even when _delete_bucket raises"
+    )
     assert destroy_events[0]["instance_id"] == instance_id
