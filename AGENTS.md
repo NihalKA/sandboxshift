@@ -196,7 +196,7 @@ sandboxshift/
 │   ├── api/                     ← FastAPI endpoints
 │   ├── observability/           ← audit trail, metrics
 │   │   ├── __init__.py
-│   │   └── audit.py             ← AuditLogger (V1 stub; replaced in Prompt 6)
+│   │   └── audit.py             ← AuditLogger ✓ BUILT
 │   ├── sandbox/                 ← core sandbox logic
 │   │   ├── __init__.py          ← exports SandboxManager, RunResult
 │   │   ├── manager.py           ← SandboxManager + RunResult ✓ BUILT
@@ -219,6 +219,9 @@ sandboxshift/
 │       └── outputs.tf           ← outputs matching FargateRuntime constructor params
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
+│   ├── observability/           ← AuditLogger tests ✓ BUILT
+│   │   ├── __init__.py
+│   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
 │   └── sandbox/
 │       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (20 tests)
 │       ├── runtime/
@@ -248,7 +251,7 @@ sandboxshift/
 - [x] AWS Fargate adapter (cloud mode) — **COMPLETE** (2026-03-14)
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
 - [x] SandboxManager (orchestrator: scan → burst → runtime → provision/execute/destroy) — **COMPLETE** (2026-03-14)
-- [ ] Basic audit trail
+- [x] Basic audit trail — **COMPLETE** (2026-03-14)
 - [ ] Python CLI (sandboxshift run)
 - [ ] Pre-built runtime images (python, node, multi)
 - [ ] Terraform for AWS setup
@@ -310,6 +313,9 @@ sandboxshift/
 | 29 | SandboxManager runtime construction | Dependency injection — pre-constructed Runtime instances passed to __init__ | Keeps FargateRuntime's AWS-specific params (cluster_arn, subnet_ids, …) out of SandboxManager; mirrors Decision #12 single-responsibility pattern; trivially mockable in tests | 2026-03-14 |
 | 30 | RunResult.duration_seconds scope | Entire run() wall time (scan + decide + provision + execute + destroy) | Gives operators a single duration metric for billing/alerting; matches user mental model of "how long did my sandbox run?" | 2026-03-14 |
 | 31 | run() exception propagation on execute failure | Exception propagates after destroy() runs; no RunResult returned; run_complete not emitted | Consistent with fail-closed principle; callers must handle exceptions explicitly; partial results are never returned | 2026-03-14 |
+| 32 | AuditLogger format | JSONL append-to-file (not stdout, not structured logging library) | V1 simplicity; human-readable with `jq`; zero new dependencies; append-only preserves full history; default path ~/.sandboxshift/audit.log | 2026-03-14 |
+| 33 | AuditLogger thread safety | threading.Lock per-instance (not global) | Each AuditLogger owns its lock; no shared mutable state between instances; compatible with asyncio (called from sync context inside coroutines) | 2026-03-14 |
+| 34 | AuditLogger failure behaviour | record() never raises; entire try block catches Exception (not just OSError) | Audit failure must never crash the runtime; broadened from OSError to Exception to also catch ValueError from circular refs in event dict (json.dumps edge case) | 2026-03-14 |
 
 ---
 
