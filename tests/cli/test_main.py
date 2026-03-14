@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import sandboxshift.cli.main as _cli_main_module  # module object for monkeypatch targets
 from sandboxshift.cli.main import (
     _build_parser,
     _validate_workspace,
@@ -152,11 +153,15 @@ def test_run_sensitive_workspace_exits_1(tmp_path, monkeypatch, capsys):
     Calls _validate_workspace() directly rather than main() to avoid any
     asyncio.run() / event-loop interaction with pytest-asyncio's auto mode.
     The logic being tested belongs entirely to _validate_workspace.
+
+    Uses the module object (_cli_main_module) instead of a dotted string so
+    monkeypatch resolves _SENSITIVE_ROOTS on the submodule rather than on the
+    'main' function re-exported from sandboxshift.cli.__init__.
     """
     sensitive_dir = tmp_path / "fake_aws"
     sensitive_dir.mkdir()
     # Patch the module-level tuple so only our temp dir is treated as sensitive.
-    monkeypatch.setattr("sandboxshift.cli.main._SENSITIVE_ROOTS", (sensitive_dir,))
+    monkeypatch.setattr(_cli_main_module, "_SENSITIVE_ROOTS", (sensitive_dir,))
     with pytest.raises(SystemExit) as exc_info:
         _validate_workspace(str(sensitive_dir))
     assert exc_info.value.code == 1

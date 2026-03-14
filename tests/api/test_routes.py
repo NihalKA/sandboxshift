@@ -352,62 +352,46 @@ async def test_audit_invalid_json_lines_skipped(client, tmp_path):
 
 # ---------------------------------------------------------------------------
 # Group 6: Startup wiring
+#
+# ASGITransport does NOT send ASGI lifespan events, so app.state is never
+# populated by the lifespan context manager. These tests call
+# _build_fargate_runtime() directly — the correct unit test boundary for
+# the env-var → FargateRuntime wiring logic.
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture
-async def wiring_no_fargate():
-    """Fixture for test 25: no FARGATE env vars -> cloud_runtime_available is False."""
-    app = create_app()
-    # Blank out all FARGATE vars to ensure none leak in from the real environment
-    fargate_vars = {
-        "FARGATE_CLUSTER_ARN": "",
-        "FARGATE_TASK_DEFINITION_ARN": "",
-        "FARGATE_SUBNET_IDS": "",
-        "FARGATE_SECURITY_GROUP_IDS": "",
-        "FARGATE_LOG_GROUP": "",
-        "FARGATE_REGION": "",
-    }
-    with (
-        patch("sandboxshift.api.app.PodmanRuntime", MagicMock()),
-        patch("sandboxshift.api.app.SensitivityScanner", MagicMock()),
-        patch.dict(os.environ, fargate_vars),
-    ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
-            yield ac, app
+def test_fargate_skipped_when_env_vars_missing(monkeypatch):
+    """When any FARGATE_* env var is blank/missing, _build_fargate_runtime returns None."""
+    from sandboxshift.api.app import _build_fargate_runtime
+
+    for var in [
+        "FARGATE_CLUSTER_ARN",
+        "FARGATE_TASK_DEFINITION_ARN",
+        "FARGATE_SUBNET_IDS",
+        "FARGATE_SECURITY_GROUP_IDS",
+        "FARGATE_LOG_GROUP",
+        "FARGATE_REGION",
+    ]:
+        monkeypatch.setenv(var, "")
+    result = _build_fargate_runtime(MagicMock())
+    assert result is None
 
 
-@pytest_asyncio.fixture
-async def wiring_with_fargate():
-    """Fixture for test 26: all FARGATE env vars present -> cloud_runtime_available is True."""
-    app = create_app()
-    fargate_vars = {
-        "FARGATE_CLUSTER_ARN": "arn:aws:ecs:us-east-1:123456789012:cluster/test",
-        "FARGATE_TASK_DEFINITION_ARN": "arn:aws:ecs:us-east-1:123456789012:task-definition/test:1",
-        "FARGATE_SUBNET_IDS": "subnet-12345",
-        "FARGATE_SECURITY_GROUP_IDS": "sg-12345",
-        "FARGATE_LOG_GROUP": "/sandboxshift/test",
-        "FARGATE_REGION": "us-east-1",
-    }
-    with (
-        patch("sandboxshift.api.app.PodmanRuntime", MagicMock()),
-        patch("sandboxshift.api.app.SensitivityScanner", MagicMock()),
-        patch("sandboxshift.api.app.FargateRuntime", MagicMock()),
-        patch.dict(os.environ, fargate_vars),
-    ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
-            yield ac, app
+def test_fargate_wired_when_all_env_vars_present(monkeypatch):
+    """When all FARGATE_* env vars are set, _build_fargate_runtime returns a FargateRuntime."""
+    from sandboxshift.api.app import _build_fargate_runtime
 
-
-async def test_fargate_skipped_when_env_vars_missing(wiring_no_fargate):
-    _, app = wiring_no_fargate
-    assert app.state.cloud_runtime_available is False
-
-
-async def test_fargate_wired_when_all_env_vars_present(wiring_with_fargate):
-    _, app = wiring_with_fargate
-    assert app.state.cloud_runtime_available is True
+    monkeypatch.setenv("FARGATE_CLUSTER_ARN", "arn:aws:ecs:us-east-1:123456789012:cluster/test")
+    monkeypatch.setenv(
+        "FARGATE_TASK_DEFINITION_ARN",
+        "arn:aws:ecs:us-east-1:123456789012:task-definition/test:1",
+    )
+    monkeypatch.setenv("FARGATE_SUBNET_IDS", "subnet-12345")
+    monkeypatch.setenv("FARGATE_SECURITY_GROUP_IDS", "sg-12345")
+    monkeypatch.setenv("FARGATE_LOG_GROUP", "/sandboxshift/test")
+    monkeypatch.setenv("FARGATE_REGION", "us-east-1")
+    with patch("sandboxshift.api.app.FargateRuntime") as mock_fargate:
+        mock_fargate.return_value = MagicMock()
+        result = _build_fargate_runtime(MagicMock())
+    assert result is not None
+    mock_fargate.assert_called_once()

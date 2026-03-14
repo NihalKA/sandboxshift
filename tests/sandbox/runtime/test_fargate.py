@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import stat as _stat_module
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -227,6 +228,10 @@ async def test_provision_raises_on_workspace_too_large(
 
     class _BigStat:
         st_size = 600 * 1024 * 1024  # 600 MB
+        # Python 3.13 is_file() calls stat(follow_symlinks=...).st_mode to check
+        # S_ISREG. Without st_mode the mock raises AttributeError inside pathlib
+        # before the 500 MB guard in provision() is reached.
+        st_mode = _stat_module.S_IFREG | 0o644  # regular file
 
     # Python 3.13 pathlib passes follow_symlinks=True as a keyword argument to
     # stat() from within .exists(), .is_dir(), .is_file() etc.  The mock must
