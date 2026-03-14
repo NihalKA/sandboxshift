@@ -260,15 +260,20 @@ class PodmanRuntime(Runtime):
     async def destroy(self, instance_id: str) -> None:
         """Destroy the sandbox container. Idempotent — never raises.
 
-        Calls `podman rm -f {instance_id}`. Ignores non-zero exit codes
-        (the container may already be gone due to the --rm flag on `podman run`).
+        Calls `podman rm -f {instance_id}`. Ignores all errors including:
+        - Non-zero exit codes (container already removed by --rm flag on podman run)
+        - FileNotFoundError / OSError (podman binary not on PATH)
 
         Args:
             instance_id: The ID returned by provision(). If unknown, this is a no-op.
         """
         cmd = ["podman", "rm", "-f", instance_id]
-        # Swallow all errors — container may already be removed (--rm flag).
-        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        try:
+            # Swallow all errors — container may already be removed (--rm flag)
+            # or podman may not be installed in the test/CI environment.
+            await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        except Exception:  # noqa: BLE001 — intentionally broad; destroy must never raise
+            pass
 
         # Remove from internal state — pop with None default so unknown IDs don't raise.
         self._instances.pop(instance_id, None)
