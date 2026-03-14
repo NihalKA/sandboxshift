@@ -198,6 +198,8 @@ sandboxshift/
 │   │   ├── __init__.py
 │   │   └── audit.py             ← AuditLogger (V1 stub; replaced in Prompt 6)
 │   ├── sandbox/                 ← core sandbox logic
+│   │   ├── __init__.py          ← exports SandboxManager, RunResult
+│   │   ├── manager.py           ← SandboxManager + RunResult ✓ BUILT
 │   │   ├── runtime/             ← podman, fargate adapters ✓ BUILT
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py          ← Runtime ABC + TaskResult
@@ -218,9 +220,10 @@ sandboxshift/
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
 │   └── sandbox/
+│       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (20 tests)
 │       ├── runtime/
 │       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (40 tests)
-│       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (28 tests)
+│       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (29 tests)
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
@@ -244,6 +247,7 @@ sandboxshift/
 - [x] Burst decision engine (RAM check → local or cloud) — **COMPLETE** (2026-03-14)
 - [x] AWS Fargate adapter (cloud mode) — **COMPLETE** (2026-03-14)
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
+- [x] SandboxManager (orchestrator: scan → burst → runtime → provision/execute/destroy) — **COMPLETE** (2026-03-14)
 - [ ] Basic audit trail
 - [ ] Python CLI (sandboxshift run)
 - [ ] Pre-built runtime images (python, node, multi)
@@ -303,6 +307,9 @@ sandboxshift/
 | 26 | Missing ECS exitCode sentinel | -1 with audit warning | Distinguishes "process exited 0" from "exitCode unavailable"; auditable | 2026-03-14 |
 | 27 | V1 image selection in FargateRuntime | Passthrough — task definition controls image | ECS task def pins the image; workspace marker detection is audit-only in V1 | 2026-03-14 |
 | 28 | ECS poll interval | 5-second asyncio.sleep | Balances responsiveness vs API call cost; configurable upgrade in V2 | 2026-03-14 |
+| 29 | SandboxManager runtime construction | Dependency injection — pre-constructed Runtime instances passed to __init__ | Keeps FargateRuntime's AWS-specific params (cluster_arn, subnet_ids, …) out of SandboxManager; mirrors Decision #12 single-responsibility pattern; trivially mockable in tests | 2026-03-14 |
+| 30 | RunResult.duration_seconds scope | Entire run() wall time (scan + decide + provision + execute + destroy) | Gives operators a single duration metric for billing/alerting; matches user mental model of "how long did my sandbox run?" | 2026-03-14 |
+| 31 | run() exception propagation on execute failure | Exception propagates after destroy() runs; no RunResult returned; run_complete not emitted | Consistent with fail-closed principle; callers must handle exceptions explicitly; partial results are never returned | 2026-03-14 |
 
 ---
 
