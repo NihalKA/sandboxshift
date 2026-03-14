@@ -189,7 +189,8 @@ sandboxshift/
 │       ├── ADR-001-system-architecture.md
 │       ├── ADR-002-sensitivity-scanner.md
 │       ├── ADR-003-burst-engine.md
-│       └── ADR-004-podman-runtime.md
+│       ├── ADR-004-podman-runtime.md
+│       └── ADR-005-fargate-runtime.md
 ├── src/
 │   ├── config.py                ← SandboxConfig dataclass (shared by all runtimes)
 │   ├── api/                     ← FastAPI endpoints
@@ -197,10 +198,11 @@ sandboxshift/
 │   │   ├── __init__.py
 │   │   └── audit.py             ← AuditLogger (V1 stub; replaced in Prompt 6)
 │   ├── sandbox/                 ← core sandbox logic
-│   │   ├── runtime/             ← podman, gvisor, fargate adapters ✓ BUILT (podman)
+│   │   ├── runtime/             ← podman, fargate adapters ✓ BUILT
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py          ← Runtime ABC + TaskResult
-│   │   │   └── podman.py        ← PodmanRuntime ✓ BUILT
+│   │   │   ├── podman.py        ← PodmanRuntime ✓ BUILT
+│   │   │   └── fargate.py       ← FargateRuntime ✓ BUILT
 │   │   ├── burst/               ← burst decision engine ✓ BUILT
 │   │   │   ├── __init__.py
 │   │   │   └── engine.py
@@ -208,12 +210,17 @@ sandboxshift/
 │   │       ├── __init__.py
 │   │       └── sensitivity.py
 │   └── cli/                     ← sandboxshift CLI
-├── terraform/                   ← AWS infrastructure
+├── terraform/
+│   └── fargate/                 ← AWS infrastructure for FargateRuntime ✓ BUILT
+│       ├── main.tf              ← ECS cluster, task def, IAM, SG, CW log group
+│       ├── variables.tf         ← all Terraform input variables
+│       └── outputs.tf           ← outputs matching FargateRuntime constructor params
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
 │   └── sandbox/
-│       ├── runtime/             ← PodmanRuntime tests ✓ BUILT
-│       │   └── test_podman.py
+│       ├── runtime/
+│       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (40 tests)
+│       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (28 tests)
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
@@ -223,7 +230,8 @@ sandboxshift/
     └── components/
         ├── burst-engine.md
         ├── podman-runtime.md
-        └── sensitivity-scanner.md
+        ├── sensitivity-scanner.md
+        └── fargate-runtime.md   ← FargateRuntime docs ✓ BUILT
 ```
 
 ---
@@ -234,7 +242,7 @@ sandboxshift/
 - [ ] Core FastAPI server
 - [x] Podman sandbox adapter (local mode) — **COMPLETE** (2026-03-14)
 - [x] Burst decision engine (RAM check → local or cloud) — **COMPLETE** (2026-03-14)
-- [ ] AWS Fargate adapter (cloud mode)
+- [x] AWS Fargate adapter (cloud mode) — **COMPLETE** (2026-03-14)
 - [x] Sensitive data detection (Layer 1 + 2) — **COMPLETE** (2026-03-08)
 - [ ] Basic audit trail
 - [ ] Python CLI (sandboxshift run)
@@ -288,6 +296,13 @@ sandboxshift/
 | 19 | PodmanRuntime image selection | Workspace marker auto-detection (_detect_image) | Zero-config UX; multiple markers → runtime-multi; no user-supplied image override | 2026-03-14 |
 | 20 | AuditLogger V1 | No-op stub in src/observability/audit.py | Placeholder for real implementation in Prompt 6 (basic audit trail); all callers already wired | 2026-03-14 |
 | 21 | Shared config dataclass | SandboxConfig in src/config.py | Single source of truth for all runtimes (PodmanRuntime, FargateRuntime, SandboxManager) | 2026-03-14 |
+| 22 | FargateRuntime credential model | boto3.Session() with no constructor creds | IAM role / AWS_PROFILE / env vars only; constructor never accepts aws_access_key_id or aws_secret_access_key | 2026-03-14 |
+| 23 | Workspace S3 transfer method | put_object per file (not multipart) | V1 simplicity; 500 MB workspace cap makes multipart unnecessary | 2026-03-14 |
+| 24 | CloudWatch log retrieval | get_log_events post-stop | Simplest V1 approach; stdout/stderr combined; avoids streaming complexity | 2026-03-14 |
+| 25 | S3 bucket encryption | AES256 SSE (not KMS) | No KMS key management overhead for V1; AES256 is sufficient and free | 2026-03-14 |
+| 26 | Missing ECS exitCode sentinel | -1 with audit warning | Distinguishes "process exited 0" from "exitCode unavailable"; auditable | 2026-03-14 |
+| 27 | V1 image selection in FargateRuntime | Passthrough — task definition controls image | ECS task def pins the image; workspace marker detection is audit-only in V1 | 2026-03-14 |
+| 28 | ECS poll interval | 5-second asyncio.sleep | Balances responsiveness vs API call cost; configurable upgrade in V2 | 2026-03-14 |
 
 ---
 
