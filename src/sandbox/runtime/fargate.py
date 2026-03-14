@@ -291,6 +291,9 @@ class FargateRuntime(Runtime):
         Stops the ECS task (if running), deletes all S3 objects, deletes the
         S3 bucket, and removes the instance from internal state.
 
+        The audit record is written in the finally block to guarantee it is
+        always emitted regardless of cleanup errors (Security Layer 7).
+
         Args:
             instance_id: The ID returned by provision(). Unknown IDs are a no-op.
         """
@@ -301,9 +304,11 @@ class FargateRuntime(Runtime):
             if state:
                 await asyncio.to_thread(self._delete_bucket, state.bucket_name)
             self._instances.pop(instance_id, None)
-            self._audit.record({"event": "destroy", "instance_id": instance_id})
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — destroy must never raise
             pass
+        finally:
+            # Security Layer 7: audit event must always fire, even if cleanup fails.
+            self._audit.record({"event": "destroy", "instance_id": instance_id})
 
     # -----------------------------------------------------------------------
     # Sync helpers (called via asyncio.to_thread)
