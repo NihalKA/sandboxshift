@@ -18,6 +18,7 @@ For a full introduction see the [README](../README.md).
 | Component | Layer | Description |
 |-----------|-------|-------------|
 | [SensitivityScanner](components/sensitivity-scanner.md) | Security Layer 6 of 7 | Detects sensitive files and secret patterns in the workspace before any cloud decision is made. Forces local execution when secrets are found. |
+| [BurstEngine](components/burst-engine.md) | Scheduling Step 2 of 6 | Decides whether to run a sandbox locally or burst to the user's own AWS Fargate. Consumes `SensitivityScanner`'s result and available system RAM. Sensitive workspaces unconditionally run local. |
 
 > More components will be documented here as they are implemented.
 
