@@ -79,20 +79,21 @@ class AuditLogger:
 
         Note:
             This method never raises.  If the write fails for any reason
-            (disk full, permissions, etc.) the error is silently swallowed.
-            The runtime must never be interrupted by an audit failure.
+            (disk full, permissions, circular references in event, etc.)
+            the error is silently swallowed.  The runtime must never be
+            interrupted by an audit failure.
         """
-        entry = {
-            "ts": datetime.now(tz=timezone.utc).isoformat(),
-            "session": self._session_id,
-            **event,
-        }
-        line = json.dumps(entry, default=str)
         try:
+            entry = {
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+                "session": self._session_id,
+                **event,
+            }
+            line = json.dumps(entry, default=str)
             with self._lock:
                 with self._log_path.open("a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-        except OSError:
+        except Exception:  # noqa: BLE001
             pass  # audit failures must never crash the runtime
 
     # ------------------------------------------------------------------
