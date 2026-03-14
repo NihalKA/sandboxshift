@@ -193,7 +193,11 @@ sandboxshift/
 │       └── ADR-005-fargate-runtime.md
 ├── src/
 │   ├── config.py                ← SandboxConfig dataclass (shared by all runtimes)
-│   ├── api/                     ← FastAPI endpoints
+│   ├── api/                     ← FastAPI endpoints ✓ BUILT
+│   │   ├── __init__.py          ← exports create_app
+│   │   ├── models.py            ← RunRequest, RunResponse, HealthResponse, AuditEntry
+│   │   ├── routes.py            ← POST /run, GET /health, GET /audit
+│   │   └── app.py               ← create_app() factory with async lifespan wiring
 │   ├── observability/           ← audit trail, metrics
 │   │   ├── __init__.py
 │   │   └── audit.py             ← AuditLogger ✓ BUILT
@@ -219,6 +223,9 @@ sandboxshift/
 │       └── outputs.tf           ← outputs matching FargateRuntime constructor params
 ├── images/                      ← Chainguard-based runtime images
 ├── tests/
+│   ├── api/                     ← FastAPI layer tests ✓ BUILT
+│   │   ├── __init__.py
+│   │   └── test_routes.py       ← 26 tests across 6 groups
 │   ├── observability/           ← AuditLogger tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
@@ -245,7 +252,7 @@ sandboxshift/
 ## Build Phases
 
 ### Phase 1 — V1 (Current Focus)
-- [ ] Core FastAPI server
+- [x] Core FastAPI server — **COMPLETE** (2026-03-14)
 - [x] Podman sandbox adapter (local mode) — **COMPLETE** (2026-03-14)
 - [x] Burst decision engine (RAM check → local or cloud) — **COMPLETE** (2026-03-14)
 - [x] AWS Fargate adapter (cloud mode) — **COMPLETE** (2026-03-14)
@@ -316,6 +323,11 @@ sandboxshift/
 | 32 | AuditLogger format | JSONL append-to-file (not stdout, not structured logging library) | V1 simplicity; human-readable with `jq`; zero new dependencies; append-only preserves full history; default path ~/.sandboxshift/audit.log | 2026-03-14 |
 | 33 | AuditLogger thread safety | threading.Lock per-instance (not global) | Each AuditLogger owns its lock; no shared mutable state between instances; compatible with asyncio (called from sync context inside coroutines) | 2026-03-14 |
 | 34 | AuditLogger failure behaviour | record() never raises; entire try block catches Exception (not just OSError) | Audit failure must never crash the runtime; broadened from OSError to Exception to also catch ValueError from circular refs in event dict (json.dumps edge case) | 2026-03-14 |
+| 35 | API app instantiation | create_app() factory only — no module-level app instance | Enables clean dependency injection in tests; prevents shared state across test runs | 2026-03-14 |
+| 36 | POST /run HTTP error mapping | Non-zero task exit_code → HTTP 200; Python exception → HTTP 500 | Exit code is a task result, not an API error; callers inspect exit_code to determine success | 2026-03-14 |
+| 37 | GET /audit JSONL parsing | Invalid lines silently skipped; missing file → empty list | Malformed log lines must never break the audit endpoint; degraded output is better than 500 | 2026-03-14 |
+| 38 | API workspace validation | Pydantic @field_validator: exists + resolves symlinks + rejects sensitive paths | Defence-in-depth at API boundary; SensitivityScanner is not the sole guard for path safety | 2026-03-14 |
+| 39 | API allowed_hosts validation | FQDN-only; bare IPs rejected; link-local + private ranges blocked | Prevents SSRF against IMDS (169.254.169.254) and internal services reachable from sandbox network | 2026-03-14 |
 
 ---
 
