@@ -28,8 +28,9 @@ variable "task_memory" {
 }
 
 variable "ecr_registry" {
-  description = "ECR registry hostname (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com)."
+  description = "ECR registry hostname (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com). Leave empty to use Docker Hub image names."
   type        = string
+  default     = ""
 }
 
 variable "environment" {
@@ -38,18 +39,31 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "use_default_vpc" {
+  description = "If true, use the AWS account default VPC and its subnets automatically. Set false to supply vpc_id and subnet_ids explicitly."
+  type        = bool
+  default     = true
+}
+
 variable "vpc_id" {
-  description = "VPC ID where Fargate tasks will run."
+  description = "VPC ID where Fargate tasks will run. Only required when use_default_vpc = false."
   type        = string
+  default     = ""
 }
 
 variable "subnet_ids" {
-  description = "List of subnet IDs for Fargate task network interfaces."
+  description = "List of subnet IDs for Fargate task network interfaces. Only required when use_default_vpc = false."
   type        = list(string)
+  default     = []
 }
 
 variable "allowed_egress_cidr_blocks" {
-  description = "CIDR blocks the sandbox task may reach outbound (enforced by security group)."
+  description = "CIDR blocks the sandbox task may reach outbound (port 443, enforced by security group)."
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
+}
+
+variable "workspace_bucket_name" {
+  description = "Name for the S3 workspace staging bucket. Must be globally unique. Recommended: suffix with your 12-digit AWS account ID (e.g. sandboxshift-workspace-123456789012)."
+  type        = string
 }

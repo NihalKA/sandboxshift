@@ -12,6 +12,21 @@ provider "aws" {
   region = var.aws_region
 }
 
+# ── VPC (optional default VPC convenience) ─────────────────────────────────────────────────
+
+data "aws_vpc" "default" {
+  count   = var.use_default_vpc ? 1 : 0
+  default = true
+}
+
+data "aws_subnets" "default" {
+  count = var.use_default_vpc ? 1 : 0
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default[0].id]
+  }
+}
+
 # ── ECS Cluster ────────────────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "sandboxshift" {
@@ -42,6 +57,58 @@ resource "aws_cloudwatch_log_group" "sandboxshift" {
   retention_in_days = 7
 
   tags = local.common_tags
+}
+
+# ── S3 Workspace Staging Bucket ─────────────────────────────────────────────────────────────
+#
+# Stores workspace files during Fargate task execution.
+# FargateRuntime uploads workspace contents here, then downloads inside the container.
+# All objects auto-expire after 1 day (safety net if destroy() fails).
+# Decision #25: AES256 SSE (not KMS) — no key management overhead for V1.
+
+resource "aws_s3_bucket" "workspace" {
+  bucket = var.workspace_bucket_name
+
+  tags = local.common_tags
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "workspace" {
+  bucket = aws_s3_bucket.workspace.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "workspace" {
+  bucket = aws_s3_bucket.workspace.id
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "workspace" {
+  bucket = aws_s3_bucket.workspace.id
+
+  rule {
+    id     = "expire-workspace-objects"
+    status = "Enabled"
+    expiration {
+      days = 1
+    }
+    filter {}
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "workspace" {
+  bucket = aws_s3_bucket.workspace.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
 # ── IAM Role for ECS Task Execution ──────────────────────────────────────────────────────────────
@@ -90,9 +157,12 @@ resource "aws_iam_role_policy" "task_s3" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:ListBucket"]
-      Resource = ["arn:aws:s3:::sandboxshift-*", "arn:aws:s3:::sandboxshift-*/*"]
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:ListBucket"]
+      Resource = [
+        aws_s3_bucket.workspace.arn,
+        "${aws_s3_bucket.workspace.arn}/*",
+      ]
     }]
   })
 }
@@ -102,7 +172,7 @@ resource "aws_iam_role_policy" "task_s3" {
 resource "aws_security_group" "sandbox_task" {
   name        = "${var.cluster_name}-sandbox-task"
   description = "Outbound allow-list for SandboxShift Fargate tasks"
-  vpc_id      = var.vpc_id
+  vpc_id      = var.use_default_vpc ? data.aws_vpc.default[0].id : var.vpc_id
 
   # Egress: allow only to configured CIDRs (network_allow enforcement)
   dynamic "egress" {
