@@ -12,7 +12,7 @@ SandboxShift is a **self-hosted AI agent sandbox with automatic local/cloud burs
 
 ### One-line pitch
 > "Run AI agent sandboxes locally. When your machine can't handle it, it automatically
-> bursts to your own AWS. Your data never touches anyone else’s servers."
+> bursts to your own AWS. Your data never touches anyone else's servers."
 
 ---
 
@@ -250,7 +250,7 @@ sandboxshift/
 │   └── sandbox/
 │       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (20 tests)
 │       ├── runtime/
-│       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (40 tests)
+│       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (41 tests)
 │       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (29 tests)
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
@@ -363,6 +363,7 @@ sandboxshift/
 | 50 | Port host bind address | Always `127.0.0.1` (never `0.0.0.0`) on host side | Prevents exposing sandbox ports on LAN or public interfaces | 2026-03-19 |
 | 51 | Streaming subprocess trigger | `subprocess.Popen` + line stream used when `config.ports` non-empty; `subprocess.run(capture_output=True)` kept otherwise | Long-running servers need real-time output; batch tasks benefit from captured stdout | 2026-03-19 |
 | 52 | Port conflict detection | `_check_port_available(host_port)` called in `provision()` before container starts; raises `OSError` | Fail-fast before container starts; avoids silent bind failure | 2026-03-19 |
+| 53 | PodmanRuntime entrypoint override | Always pass `--entrypoint /bin/sh` before the image name; container command is then `-c <task>` | Chainguard python sets `ENTRYPOINT ["python"]`; without override `podman run ... image /bin/sh -c task` becomes `python /bin/sh -c task`, causing Python to exec /bin/sh as a script and crash with ELF-header SyntaxError | 2026-03-19 |
 
 ---
 
