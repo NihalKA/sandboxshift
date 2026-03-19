@@ -22,6 +22,9 @@ class SandboxConfig:
         setup_command:      Optional shell command run before the main task.
                             If set, PodmanRuntime runs it as ``setup_command && task``
                             in a single /bin/sh invocation. None = no setup step.
+        ports:              List of (host_port, container_port) tuples to expose.
+                            Ports are bound to 127.0.0.1 only (never 0.0.0.0).
+                            Empty list = no port exposure (default).
     """
 
     cpu_limit: float = 2.0
@@ -30,3 +33,4 @@ class SandboxConfig:
     timeout_seconds: int = 1800
     workspace_readonly: bool = False
     setup_command: str | None = None
+    ports: list[tuple[int, int]] = field(default_factory=list)
