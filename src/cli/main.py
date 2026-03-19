@@ -185,6 +185,8 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
     effective_setup = args.setup if args.setup is not None else yaml_cfg.get("setup_command")
     # network_allow: CLI --allow wins over YAML.
     effective_allow = list(args.allow) if args.allow else yaml_cfg.get("network_allow", [])
+    # skip_sensitivity_check: CLI --skip-sensitivity-check wins over YAML.
+    skip_scan = args.skip_sensitivity_check or yaml_cfg.get("skip_sensitivity_check", False)
 
     config = SandboxConfig(
         cpu_limit=args.cpu,
@@ -193,6 +195,7 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         timeout_seconds=args.timeout,
         setup_command=effective_setup,
         ports=all_ports,
+        skip_sensitivity_check=skip_scan,
     )
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
@@ -310,6 +313,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Expose container port to host as HOST:CONTAINER (e.g. --port 8000:8000)."
             " Repeatable."
+        ),
+    )
+    run_p.add_argument(
+        "--skip-sensitivity-check",
+        action="store_true",
+        default=False,
+        dest="skip_sensitivity_check",
+        help=(
+            "Skip the sensitive-data scan. Use only for workspaces you own and trust. "
+            "WARNING: disables Security Layer 6."
         ),
     )
 

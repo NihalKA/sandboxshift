@@ -1,7 +1,7 @@
 """SandboxManager — central orchestrator for SandboxShift.
 
 Coordinates the full sandbox lifecycle:
-  1. SensitivityScanner  → SensitivityResult
+  1. SensitivityScanner  → SensitivityResult  (skipped if config.skip_sensitivity_check)
   2. BurstEngine         → BurstDecision
   3. Runtime selection   → local_runtime or cloud_runtime
   4. provision / execute / destroy (destroy in finally — always runs)
@@ -14,6 +14,7 @@ pattern as Decision #12 (BurstEngine enforces FORCE_LOCAL, not SandboxManager).
 
 Audit events emitted:
   "run_start"                 — before scan; always emitted
+  "sensitivity_check_skipped" — when config.skip_sensitivity_check is True
   "cloud_runtime_unavailable" — when decision==cloud but cloud_runtime is None
   "run_complete"              — after successful execute + destroy
 """
@@ -27,7 +28,7 @@ from pathlib import Path
 from ..config import SandboxConfig
 from ..observability.audit import AuditLogger
 from .burst.engine import BurstEngine
-from .detection.sensitivity import SensitivityScanner
+from .detection.sensitivity import SensitivityResult, SensitivityScanner, Recommendation
 from .runtime.base import Runtime, TaskResult
 
 
@@ -44,7 +45,7 @@ class RunResult:
         task_result:          Exit code, stdout, stderr, and execute() duration.
         runtime_mode:         Actual mode used — "local" or "cloud".
         sensitivity_reasons:  Human-readable findings from SensitivityScanner.explain().
-                              Empty list when workspace is clean.
+                              Empty list when workspace is clean or scan was skipped.
         burst_confidence:     "forced" or "preferred" from BurstDecision.
         duration_seconds:     Total wall-clock time for the entire run() call,
                               including provision, execute, and destroy.
@@ -108,7 +109,9 @@ class SandboxManager:
 
         Steps:
           1. Emit "run_start" audit event.
-          2. SensitivityScanner.scan(workspace) → SensitivityResult.
+          2a. If config.skip_sensitivity_check is True: emit audit warning,
+              produce an empty SensitivityResult (ALLOW_CLOUD).
+          2b. Otherwise: SensitivityScanner.scan(workspace) → SensitivityResult.
           3. BurstEngine.decide(scan_result, workspace, config) → BurstDecision.
           4. If decision.mode == "cloud" but cloud_runtime is None: emit
              "cloud_runtime_unavailable" audit event; override mode to "local".
@@ -143,11 +146,26 @@ class SandboxManager:
                 "event": "run_start",
                 "workspace": str(workspace),
                 "task": task,
+                "skip_sensitivity_check": config.skip_sensitivity_check,
             }
         )
 
-        # Step 2: Sensitivity scan
-        scan_result = await self._scanner.scan(workspace)
+        # Step 2: Sensitivity scan (or skip)
+        if config.skip_sensitivity_check:
+            self._audit.record(
+                {
+                    "event": "sensitivity_check_skipped",
+                    "workspace": str(workspace),
+                    "reason": "skip_sensitivity_check=True in config",
+                }
+            )
+            scan_result = SensitivityResult(
+                is_sensitive=False,
+                findings=[],
+                recommendation=Recommendation.ALLOW_CLOUD,
+            )
+        else:
+            scan_result = await self._scanner.scan(workspace)
 
         # Step 3: Burst decision
         decision = await self._burst_engine.decide(scan_result, workspace, config)

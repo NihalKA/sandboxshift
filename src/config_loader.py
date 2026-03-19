@@ -23,8 +23,9 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
     Supported YAML structure::
 
         sandbox:
-          timeout: 1800       # seconds
-          setup: "uv sync"    # shell command
+          timeout: 1800             # seconds
+          setup: "uv sync"          # shell command
+          skip_sensitivity_check: true  # skip scan for trusted workspaces
 
         network:
           allow:
@@ -32,14 +33,14 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
 
         resources:
           cpu: 2
-          memory: 4096        # MB, or "4GB" / "4096MB"
+          memory: 4096              # MB, or "4GB" / "4096MB"
 
         ports:
           - 8000:8000
           - 3000:3000
 
     sensitivity:
-      level: auto             # reserved for V2; ignored in V1
+      level: auto                   # reserved for V2; ignored in V1
     """
     config_file = workspace_path / "sandboxshift.yaml"
     if not config_file.exists():
@@ -69,6 +70,8 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         result["timeout_seconds"] = int(sandbox["timeout"])
     if "setup" in sandbox:
         result["setup_command"] = str(sandbox["setup"])
+    if sandbox.get("skip_sensitivity_check"):
+        result["skip_sensitivity_check"] = True
 
     # ── network section ──────────────────────────────────────────────────────
     network = data.get("network") or {}
