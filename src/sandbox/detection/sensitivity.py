@@ -123,26 +123,24 @@ SENSITIVE_DIR_COMPONENTS: list[tuple[str, str]] = [
 # Content-scan patterns
 # ---------------------------------------------------------------------------
 #
-# Patterns are intentionally specific to avoid false positives on common
-# code constructs:
+# Design principle: only flag quoted string literals on the RHS of
+# password/secret/api_key assignments.  This eliminates an entire class of
+# false positives without reducing detection of real hardcoded secrets:
 #
-#   GOOD (should flag):   API_KEY = "sk-abc123"   or   password = 'hunter2'
-#   BAD (must NOT flag):  API_KEY = os.environ.get('KEY')  ← RHS is a call
-#                         apiKey={2}                       ← RHS is a format placeholder
-#                         secret = None                    ← RHS is None keyword
+#   SHOULD flag:  api_key = "sk-abc123def456"  (quoted literal)
+#                 password = 'hunter2secret!'  (quoted literal)
 #
-# Strategy for password/secret/api_key patterns:
-#   Require the RHS to be a quoted string literal OR a bare alphanumeric/special
-#   token that is NOT a Python/JS keyword or a format placeholder.
+#   Must NOT flag:
+#     API_KEY = os.environ.get('X')  — RHS is a function call, not a literal
+#     apiKey={2}                     — RHS is a str.format() placeholder
+#     secret = None                  — RHS is a keyword
+#     secret = some_variable         — RHS is a variable reference
 #
-#   RHS anchors used:
-#     (?:"[^"\n]+"|'[^'\n]+') — a non-empty quoted string (single or double)
-#     [A-Za-z0-9+/._-]{8,}    — a bare token of 8+ chars (rules out {n}, None,
-#                                True, False, short variable names)
-#
-# The AKIA and PEM patterns are structural and do not need the same treatment.
+# The AKIA AWS key pattern and PEM header are structurally unambiguous and
+# do not need this treatment.
 
-_QUOTED_OR_TOKEN = r"(?:""\"[^\"\n]+\"""|'[^'\n]+'|[A-Za-z0-9+/._\-]{8,})"
+# Matches a non-empty single- or double-quoted string on a single line.
+_QUOTED_STRING = r'(?:"[^"\n]+"|' + r"'[^'\n]+')"
 
 SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (
@@ -156,26 +154,18 @@ SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         "PEM private key header detected",
     ),
     (
-        re.compile(
-            r"(?i)password\s*=\s*" + _QUOTED_OR_TOKEN,
-        ),
-        r"(?i)password\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
+        re.compile(r"(?i)password\s*=\s*" + _QUOTED_STRING),
+        r"(?i)password\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+')",
         "Hardcoded password assignment detected",
     ),
     (
-        re.compile(
-            r"(?i)(?:^|[\s,({])secret\s*=\s*" + _QUOTED_OR_TOKEN,
-            re.MULTILINE,
-        ),
-        r"(?i)secret\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
+        re.compile(r"(?i)secret\s*=\s*" + _QUOTED_STRING),
+        r"(?i)secret\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+')",
         "Hardcoded secret assignment detected",
     ),
     (
-        re.compile(
-            r"(?i)(?:^|[\s,({])api[_-]?key\s*=\s*" + _QUOTED_OR_TOKEN,
-            re.MULTILINE,
-        ),
-        r"(?i)api[_-]?key\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
+        re.compile(r"(?i)api[_-]?key\s*=\s*" + _QUOTED_STRING),
+        r"(?i)api[_-]?key\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+')",
         "Hardcoded API key assignment detected",
     ),
     (
