@@ -17,6 +17,12 @@ configured, subprocess.Popen is used for real-time stdout streaming
 
 --privileged is NEVER passed. This is enforced by construction — the flag
 does not appear anywhere in this module.
+
+--entrypoint /bin/sh is ALWAYS passed (Decision #53). This overrides any
+ENTRYPOINT baked into the base image (e.g. Chainguard python sets
+ENTRYPOINT ["python"]). Without this, podman run ... image /bin/sh -c task
+would be interpreted as python /bin/sh -c task, causing Python to try to
+execute /bin/sh as a script and crash with a SyntaxError on the ELF header.
 """
 
 from __future__ import annotations
@@ -251,6 +257,9 @@ class PodmanRuntime(Runtime):
         terminal.  The returned ``TaskResult.stdout`` is
         ``"<streamed to terminal>"`` in that case (Decision #51).
 
+        ``--entrypoint /bin/sh`` is always passed (Decision #53) so the task
+        runs via /bin/sh regardless of the ENTRYPOINT baked into the image.
+
         Args:
             instance_id: Returned by provision().
             task:        Shell command string, wrapped in /bin/sh -c.
@@ -291,6 +300,8 @@ class PodmanRuntime(Runtime):
         for h, c in state.config.ports:
             port_flags.extend(["-p", f"127.0.0.1:{h}:{c}"])
 
+        # --entrypoint /bin/sh overrides any ENTRYPOINT set by the base image
+        # (e.g. Chainguard python sets ENTRYPOINT ["python"]).  Decision #53.
         cmd: list[str] = [
             "podman",
             "run",
@@ -311,10 +322,11 @@ class PodmanRuntime(Runtime):
             "/workspace",
             "--security-opt",
             "no-new-privileges",
+            "--entrypoint",
+            "/bin/sh",
             *network_flags,
             *port_flags,
             state.image,
-            "/bin/sh",
             "-c",
             shell_cmd,
         ]

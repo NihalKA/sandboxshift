@@ -108,12 +108,12 @@ def mock_port_check(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_detect_image_python(tmp_workspace: Path) -> None:
     (tmp_workspace / "requirements.txt").touch()
-    assert _detect_image(tmp_workspace) == "cgr.dev/chainguard/python:latest"
+    assert _detect_image(tmp_workspace) == "sandboxshift/runtime-python:3.11"
 
 
 def test_detect_image_node(tmp_workspace: Path) -> None:
     (tmp_workspace / "package.json").touch()
-    assert _detect_image(tmp_workspace) == "cgr.dev/chainguard/node:latest"
+    assert _detect_image(tmp_workspace) == "sandboxshift/runtime-node:20"
 
 
 def test_detect_image_go(tmp_workspace: Path) -> None:
@@ -124,11 +124,11 @@ def test_detect_image_go(tmp_workspace: Path) -> None:
 def test_detect_image_multi(tmp_workspace: Path) -> None:
     (tmp_workspace / "requirements.txt").touch()
     (tmp_workspace / "package.json").touch()
-    assert _detect_image(tmp_workspace) == "sandboxshift/runtime-multi"
+    assert _detect_image(tmp_workspace) == "sandboxshift/runtime-multi:latest"
 
 
 def test_detect_image_default_on_no_markers(tmp_workspace: Path) -> None:
-    assert _detect_image(tmp_workspace) == "cgr.dev/chainguard/python:latest"
+    assert _detect_image(tmp_workspace) == "sandboxshift/runtime-python:3.11"
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ async def test_provision_detects_correct_image(
 ) -> None:
     (tmp_workspace / "package.json").touch()
     instance_id = await runtime.provision(tmp_workspace, default_config)
-    assert runtime._instances[instance_id].image == "cgr.dev/chainguard/node:latest"
+    assert runtime._instances[instance_id].image == "sandboxshift/runtime-node:20"
 
 
 async def test_provision_resolves_dns_for_allowed_domains(
@@ -469,6 +469,26 @@ async def test_execute_command_includes_workdir(
     assert "--workdir" in cmd
     wd_idx = cmd.index("--workdir")
     assert cmd[wd_idx + 1] == "/workspace"
+
+
+async def test_execute_command_overrides_entrypoint(
+    tmp_workspace: Path,
+    default_config: SandboxConfig,
+    mock_subprocess,
+) -> None:
+    """--entrypoint /bin/sh must always be in the podman run command (Decision #53).
+
+    This guards against base images with a conflicting ENTRYPOINT (e.g.
+    Chainguard python sets ENTRYPOINT ["python"]) which would cause
+    '/bin/sh -c task' to be interpreted as 'python /bin/sh -c task',
+    crashing with an ELF-header SyntaxError.
+    """
+    rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
+    await rt.execute(iid, "echo hi", default_config)
+    cmd = mock_subprocess.call_args[0][0]
+    assert "--entrypoint" in cmd
+    ep_idx = cmd.index("--entrypoint")
+    assert cmd[ep_idx + 1] == "/bin/sh"
 
 
 async def test_execute_timeout_passed_to_subprocess(
