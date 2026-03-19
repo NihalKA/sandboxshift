@@ -19,6 +19,9 @@ class SandboxConfig:
         network_allow:      FQDNs the container may reach outbound. Empty = no network.
         timeout_seconds:    Maximum task wall-clock time before kill.
         workspace_readonly: If True, workspace is mounted read-only inside the container.
+        setup_command:      Optional shell command run before the main task.
+                            If set, PodmanRuntime runs it as ``setup_command && task``
+                            in a single /bin/sh invocation. None = no setup step.
     """
 
     cpu_limit: float = 2.0
@@ -26,3 +29,4 @@ class SandboxConfig:
     network_allow: list[str] = field(default_factory=list)
     timeout_seconds: int = 1800
     workspace_readonly: bool = False
+    setup_command: str | None = None

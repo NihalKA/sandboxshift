@@ -24,6 +24,10 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-python" \
 # (--volume {workspace}:/workspace --workdir /workspace)
 WORKDIR /workspace
 
+# Install uv package manager at build time (runs as root — lands in /usr/local/bin).
+# Available to UID 65532 at runtime for dependency installation (uv sync, uv pip install).
+RUN pip install --no-cache-dir uv
+
 # Chainguard nonroot — matches _NONROOT_USER = "65532:65532" in podman.py.
 # PodmanRuntime also passes --user 65532:65532 explicitly; this is defence-in-depth.
 USER 65532:65532

@@ -29,11 +29,12 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-multi" \
       org.opencontainers.image.description="SandboxShift multi-runtime (Python 3.11 + Node 20)" \
       org.opencontainers.image.vendor="SandboxShift"
 
-# Install both runtimes + busybox shell (provides /bin/sh for PodmanRuntime).
+# Install both runtimes + busybox shell (provides /bin/sh for PodmanRuntime) + uv.
 RUN apk add --no-cache \
         python-3.11 \
         nodejs-20 \
         busybox \
+        uv \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /workspace
