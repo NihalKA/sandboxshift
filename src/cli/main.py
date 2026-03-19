@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from ..config import SandboxConfig
+from ..config_loader import load_workspace_config
 from ..observability.audit import AuditLogger
 from ..sandbox.burst.engine import BurstEngine
 from ..sandbox.detection.sensitivity import SensitivityScanner
@@ -109,6 +110,24 @@ def _validate_allow_hosts(hosts: list[str]) -> None:
             sys.exit(1)
 
 
+def _parse_port(port_str: str) -> tuple[int, int]:
+    """Parse 'HOST:CONTAINER' string. Raises ValueError on invalid input."""
+    parts = port_str.split(":")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid port format '{port_str}': expected HOST:CONTAINER (e.g. 8000:8000)"
+        )
+    try:
+        host, container = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"Port numbers in '{port_str}' must be integers")
+    if not (1 <= host <= 65535):
+        raise ValueError(f"Host port {host} out of valid range (1-65535)")
+    if not (1 <= container <= 65535):
+        raise ValueError(f"Container port {container} out of valid range (1-65535)")
+    return (host, container)
+
+
 def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
     """Build FargateRuntime from environment variables, or return None if any are missing."""
     values = {k: os.environ.get(k, "").strip() for k in _FARGATE_ENV_VARS}
@@ -140,12 +159,40 @@ def _resolve_audit_log(args: argparse.Namespace) -> Path:
 # ---------------------------------------------------------------------------
 
 async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
+    # Load YAML config from workspace (returns {} if sandboxshift.yaml absent).
+    yaml_cfg = load_workspace_config(Path(args.workspace))
+
+    # Parse CLI --port flags; exit(1) on invalid input.
+    parsed_ports: list[tuple[int, int]] = []
+    for port_str in (args.ports or []):
+        try:
+            parsed_ports.append(_parse_port(port_str))
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Combine YAML ports with CLI ports (YAML first, then CLI), deduped.
+    yaml_ports = yaml_cfg.get("ports", [])
+    all_ports: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for p in [*yaml_ports, *parsed_ports]:
+        pt = (int(p[0]), int(p[1]))
+        if pt not in seen:
+            seen.add(pt)
+            all_ports.append(pt)
+
+    # setup_command: CLI --setup wins over YAML.
+    effective_setup = args.setup if args.setup is not None else yaml_cfg.get("setup_command")
+    # network_allow: CLI --allow wins over YAML.
+    effective_allow = list(args.allow) if args.allow else yaml_cfg.get("network_allow", [])
+
     config = SandboxConfig(
         cpu_limit=args.cpu,
         memory_limit_mb=args.memory_mb,
-        network_allow=args.allow or [],
+        network_allow=effective_allow,
         timeout_seconds=args.timeout,
-        setup_command=args.setup,
+        setup_command=effective_setup,
+        ports=all_ports,
     )
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
@@ -253,6 +300,17 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="CMD",
         dest="setup",
         help="Shell command to run before the main task (e.g. 'pip install -r requirements.txt').",
+    )
+    run_p.add_argument(
+        "--port",
+        metavar="HOST:CONTAINER",
+        action="append",
+        dest="ports",
+        default=[],
+        help=(
+            "Expose container port to host as HOST:CONTAINER (e.g. --port 8000:8000)."
+            " Repeatable."
+        ),
     )
 
     # --- audit ---

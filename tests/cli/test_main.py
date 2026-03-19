@@ -58,13 +58,21 @@ def workspace(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def mock_manager(workspace):
-    """Patch SandboxManager so run() returns a default successful run result."""
+    """Patch SandboxManager so run() returns a default successful run result.
+
+    Also patches load_workspace_config to return an empty dict so tests that
+    exercise _run_async() don't need a real sandboxshift.yaml.
+    """
     with patch("sandboxshift.cli.main.SandboxManager") as mock_cls:
         with patch("sandboxshift.cli.main.PodmanRuntime"):
             with patch("sandboxshift.cli.main.SensitivityScanner"):
-                instance = mock_cls.return_value
-                instance.run = AsyncMock(return_value=_make_run_result())
-                yield mock_cls, instance
+                with patch(
+                    "sandboxshift.cli.main.load_workspace_config",
+                    return_value={},
+                ):
+                    instance = mock_cls.return_value
+                    instance.run = AsyncMock(return_value=_make_run_result())
+                    yield mock_cls, instance
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +113,8 @@ def test_run_prints_sensitivity_reasons_when_flagged(workspace, capsys):
     flagged = _make_run_result(sensitivity_reasons=["found .env file", "found private key"])
     with patch("sandboxshift.cli.main.SandboxManager") as mock_cls, \
          patch("sandboxshift.cli.main.PodmanRuntime"), \
-         patch("sandboxshift.cli.main.SensitivityScanner"):
+         patch("sandboxshift.cli.main.SensitivityScanner"), \
+         patch("sandboxshift.cli.main.load_workspace_config", return_value={}):
         mock_cls.return_value.run = AsyncMock(return_value=flagged)
         with patch("sys.argv", ["sandboxshift", "run", str(workspace), "ls"]):
             with pytest.raises(SystemExit):
@@ -126,7 +135,8 @@ def test_run_nonzero_exit_code_exits_nonzero(workspace):
     failing = _make_run_result(exit_code=2, stdout="")
     with patch("sandboxshift.cli.main.SandboxManager") as mock_cls, \
          patch("sandboxshift.cli.main.PodmanRuntime"), \
-         patch("sandboxshift.cli.main.SensitivityScanner"):
+         patch("sandboxshift.cli.main.SensitivityScanner"), \
+         patch("sandboxshift.cli.main.load_workspace_config", return_value={}):
         mock_cls.return_value.run = AsyncMock(return_value=failing)
         with patch("sys.argv", ["sandboxshift", "run", str(workspace), "false"]):
             with pytest.raises(SystemExit) as exc_info:
@@ -395,3 +405,97 @@ def test_run_no_setup_flag_config_setup_command_is_none(
         main()
     call_kwargs = instance.run.call_args.kwargs
     assert call_kwargs["config"].setup_command is None
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — Port flags
+# ---------------------------------------------------------------------------
+
+def test_port_flag_adds_port_to_config(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--port 8000:8000 wires ports=[(8000, 8000)] into SandboxConfig."""
+    _, instance = mock_manager
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "python server.py",
+        "--port", "8000:8000",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].ports == [(8000, 8000)]
+
+
+def test_port_flag_repeatable(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--port repeated twice yields both tuples in order."""
+    _, instance = mock_manager
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "python server.py",
+        "--port", "8000:8000",
+        "--port", "3000:3000",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].ports == [(8000, 8000), (3000, 3000)]
+
+
+def test_port_flag_invalid_format_exits_1(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--port notaport → SystemExit(1) with error message on stderr."""
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+        "--port", "notaport",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_port_flag_out_of_range_exits_1(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--port 99999:8000 → SystemExit(1) because 99999 > 65535."""
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+        "--port", "99999:8000",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_yaml_ports_loaded_when_no_cli_port(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When load_workspace_config returns ports, they appear in SandboxConfig even with no --port flag."""
+    _, instance = mock_manager
+    # Override the load_workspace_config mock set by the fixture.
+    monkeypatch.setattr(
+        "sandboxshift.cli.main.load_workspace_config",
+        lambda _: {"ports": [(8000, 8000)]},
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].ports == [(8000, 8000)]
