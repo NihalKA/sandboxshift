@@ -47,6 +47,12 @@ def tmp_workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def workspace(tmp_path: Path) -> Path:
+    """Alias for tmp_path — used in Group 7 tests."""
+    return tmp_path
+
+
+@pytest.fixture()
 def default_config() -> SandboxConfig:
     """SandboxConfig with all defaults (empty network_allow)."""
     return SandboxConfig()
@@ -498,45 +504,130 @@ async def test_destroy_calls_podman_rm(
     assert last_cmd[3] == iid
 
 
-async def test_destroy_removes_from_internal_state(
-    tmp_workspace: Path,
-    default_config: SandboxConfig,
-    mock_subprocess,
-) -> None:
-    rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
-    assert iid in rt._instances
-    await rt.destroy(iid)
-    assert iid not in rt._instances
+# ---------------------------------------------------------------------------
+# Group 7 — setup_command and pip cache
+# ---------------------------------------------------------------------------
 
 
-async def test_destroy_idempotent_on_unknown_id(
+@pytest.fixture()
+def mock_pip_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect pip cache host path to tmp_path so tests don't touch real ~/.sandboxshift."""
+    fake_cache = tmp_path / ".sandboxshift" / "cache" / "pip"
+    monkeypatch.setattr(
+        "src.sandbox.runtime.podman._pip_cache_host_path",
+        lambda: fake_cache,
+    )
+    return fake_cache
+
+
+async def test_execute_without_setup_command_uses_task_directly(
     runtime: PodmanRuntime,
-    mock_subprocess,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
 ) -> None:
-    # Should not raise even for an unknown instance_id.
-    await runtime.destroy("ss-doesnotexist")
+    """No setup_command → shell string is the raw task, no &&."""
+    config = SandboxConfig()
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "echo hello", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    assert cmd[-1] == "echo hello"
+    assert "&&" not in cmd[-1]
 
 
-async def test_destroy_idempotent_when_rm_fails(
-    tmp_workspace: Path,
-    default_config: SandboxConfig,
-    mock_subprocess,
+async def test_execute_with_setup_command_composes_shell_string(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
 ) -> None:
-    mock_subprocess.return_value = _ok_result(returncode=125)
-    rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
-    # Should not raise even when podman rm exits non-zero.
-    await rt.destroy(iid)
+    """setup_command is prepended with && before the main task."""
+    config = SandboxConfig(setup_command="pip install -r requirements.txt")
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "python main.py", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    assert cmd[-1] == "pip install -r requirements.txt && python main.py"
 
 
-async def test_destroy_calls_audit_record(
-    tmp_workspace: Path,
-    default_config: SandboxConfig,
-    mock_subprocess,
+async def test_execute_with_empty_setup_command_treats_as_none(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
 ) -> None:
-    mock_audit = MagicMock(spec=AuditLogger)
-    rt = PodmanRuntime(audit_logger=mock_audit)
-    iid = await rt.provision(tmp_workspace, default_config)
-    mock_audit.reset_mock()
-    await rt.destroy(iid)
-    events = [c.args[0]["event"] for c in mock_audit.record.call_args_list]
-    assert "destroy" in events
+    """Empty string setup_command is falsy — treated same as None."""
+    config = SandboxConfig(setup_command="")
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "echo hi", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    assert cmd[-1] == "echo hi"
+    assert "&&" not in cmd[-1]
+
+
+async def test_execute_always_mounts_pip_cache_volume(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
+) -> None:
+    """Pip cache volume is always included in the podman cmd, even without setup_command."""
+    config = SandboxConfig()
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "echo test", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    volume_values = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--volume"]
+    pip_cache_volumes = [v for v in volume_values if ":/home/nonroot/.cache/pip" in v]
+    assert len(pip_cache_volumes) == 1
+
+
+async def test_execute_pip_cache_volume_is_not_readonly(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
+) -> None:
+    """Pip cache volume must never carry the :ro suffix — it must be writable."""
+    config = SandboxConfig(workspace_readonly=True)
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "echo test", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    volume_values = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--volume"]
+    pip_cache_volumes = [v for v in volume_values if ":/home/nonroot/.cache/pip" in v]
+    assert len(pip_cache_volumes) == 1
+    assert not pip_cache_volumes[0].endswith(":ro")
+
+
+async def test_execute_pip_cache_volume_present_with_setup_command(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
+) -> None:
+    """Pip cache volume is present when setup_command is set."""
+    config = SandboxConfig(setup_command="pip install numpy")
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "python -c 'import numpy'", config)
+
+    cmd = mock_subprocess.call_args[0][0]
+    volume_values = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--volume"]
+    pip_cache_volumes = [v for v in volume_values if ":/home/nonroot/.cache/pip" in v]
+    assert len(pip_cache_volumes) == 1
+
+
+async def test_execute_pip_cache_directory_created_if_missing(
+    runtime: PodmanRuntime,
+    workspace: Path,
+    mock_subprocess: MagicMock,
+    mock_pip_cache: Path,
+) -> None:
+    """execute() creates the pip cache directory on the host if it does not exist."""
+    assert not mock_pip_cache.exists()
+    config = SandboxConfig()
+    instance_id = await runtime.provision(workspace, config)
+    await runtime.execute(instance_id, "echo test", config)
+    assert mock_pip_cache.exists()

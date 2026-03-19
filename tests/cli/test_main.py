@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -340,3 +341,57 @@ def test_fargate_wired_when_all_env_vars_present(workspace, monkeypatch, mock_ma
     mock_fargate.assert_called_once()
     _, kwargs = mock_cls.call_args
     assert kwargs["cloud_runtime"] is mock_fargate.return_value
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — --setup flag
+# ---------------------------------------------------------------------------
+
+def test_setup_flag_default_is_none(tmp_path: Path) -> None:
+    """--setup defaults to None when not provided."""
+    parser = _build_parser()
+    args = parser.parse_args(["run", str(tmp_path), "echo hi"])
+    assert args.setup is None
+
+
+def test_setup_flag_is_parsed(tmp_path: Path) -> None:
+    """--setup value is parsed correctly."""
+    parser = _build_parser()
+    args = parser.parse_args([
+        "run", str(tmp_path), "echo hi",
+        "--setup", "pip install -r requirements.txt",
+    ])
+    assert args.setup == "pip install -r requirements.txt"
+
+
+def test_run_setup_flag_passed_to_sandbox_config(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--setup value is wired to SandboxConfig.setup_command."""
+    _, instance = mock_manager
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+        "--setup", "uv sync",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].setup_command == "uv sync"
+
+
+def test_run_no_setup_flag_config_setup_command_is_none(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No --setup flag → SandboxConfig.setup_command is None."""
+    _, instance = mock_manager
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].setup_command is None

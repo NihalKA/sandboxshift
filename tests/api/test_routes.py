@@ -75,6 +75,12 @@ async def client(tmp_path):
             yield ac, mock_manager, app
 
 
+@pytest.fixture()
+def workspace(tmp_path: Path) -> Path:
+    """Convenience fixture — returns tmp_path as the workspace for Group 7 tests."""
+    return tmp_path
+
+
 # ---------------------------------------------------------------------------
 # Group 1: POST /run happy path
 # ---------------------------------------------------------------------------
@@ -395,3 +401,55 @@ def test_fargate_wired_when_all_env_vars_present(monkeypatch):
         result = _build_fargate_runtime(MagicMock())
     assert result is not None
     mock_fargate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — setup_command
+# ---------------------------------------------------------------------------
+
+
+async def test_run_setup_command_passed_through_to_config(
+    client,
+    workspace: Path,
+) -> None:
+    """setup_command in the request body is wired to SandboxConfig.setup_command."""
+    ac, mock_manager, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python main.py",
+        "setup_command": "pip install -r requirements.txt",
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_manager.run.call_args.kwargs
+    assert call_kwargs["config"].setup_command == "pip install -r requirements.txt"
+
+
+async def test_run_setup_command_defaults_to_none_when_omitted(
+    client,
+    workspace: Path,
+) -> None:
+    """Omitting setup_command from the request body → SandboxConfig.setup_command is None."""
+    ac, mock_manager, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python main.py",
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_manager.run.call_args.kwargs
+    assert call_kwargs["config"].setup_command is None
+
+
+async def test_run_setup_command_null_json_maps_to_none(
+    client,
+    workspace: Path,
+) -> None:
+    """Explicit null setup_command in JSON body → SandboxConfig.setup_command is None."""
+    ac, mock_manager, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python main.py",
+        "setup_command": None,
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_manager.run.call_args.kwargs
+    assert call_kwargs["config"].setup_command is None
