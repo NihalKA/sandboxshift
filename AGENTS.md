@@ -12,7 +12,7 @@ SandboxShift is a **self-hosted AI agent sandbox with automatic local/cloud burs
 
 ### One-line pitch
 > "Run AI agent sandboxes locally. When your machine can't handle it, it automatically
-> bursts to your own AWS. Your data never touches anyone else's servers."
+> bursts to your own AWS. Your data never touches anyone else’s servers."
 
 ---
 
@@ -193,6 +193,7 @@ sandboxshift/
 │       └── ADR-005-fargate-runtime.md
 ├── src/
 │   ├── config.py                ← SandboxConfig dataclass (shared by all runtimes)
+│   ├── config_loader.py         ← load_workspace_config() — parses sandboxshift.yaml
 │   ├── api/                     ← FastAPI endpoints ✓ BUILT
 │   │   ├── __init__.py          ← exports create_app
 │   │   ├── models.py            ← RunRequest, RunResponse, HealthResponse, AuditEntry
@@ -239,10 +240,10 @@ sandboxshift/
 ├── tests/
 │   ├── api/                     ← FastAPI layer tests ✓ BUILT
 │   │   ├── __init__.py
-│   │   └── test_routes.py       ← 26 tests across 6 groups
+│   │   └── test_routes.py       ← 29 tests across 8 groups
 │   ├── cli/                     ← CLI tests ✓ BUILT
 │   │   ├── __init__.py
-│   │   └── test_main.py         ← 24 tests across 5 groups (incl. 4 security tests)
+│   │   └── test_main.py         ← 29 tests across 7 groups (incl. 5 port tests)
 │   ├── observability/           ← AuditLogger tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
@@ -358,6 +359,10 @@ sandboxshift/
 | 46 | CLI --memory-mb / --cpu bounds | Post-parse validation: memory 128–65536 MB, cpu 0.25–64.0 | CLI users bypass models.py le= constraints; prevents crash-the-host via pathological cgroup values | 2026-03-14 |
 | 47 | Runtime image Chainguard variant | :latest-dev for python/node (not distroless :latest) | PodmanRuntime runs /bin/sh -c <task>; distroless :latest has no shell and would fail every task; :latest-dev adds BusyBox (/bin/sh) + apk; network egress still controlled by PodmanRuntime allowlist (Decision #18) | 2026-03-14 |
 | 48 | Multi-runtime base image | cgr.dev/chainguard/wolfi-base + apk add python-3.11 nodejs-20 busybox | Wolfi is the upstream distro for all Chainguard images; single-layer apk install avoids fragile cross-image COPY --from; apk cache removed after install; V2 will strip apk from final layer via multi-stage build | 2026-03-14 |
+| 49 | Port exposure YAML loader | `load_workspace_config()` in `src/config_loader.py`; CLI loads it before arg merge; API does not use it | CLI-only in V1; API consumers build SandboxConfig directly | 2026-03-19 |
+| 50 | Port host bind address | Always `127.0.0.1` (never `0.0.0.0`) on host side | Prevents exposing sandbox ports on LAN or public interfaces | 2026-03-19 |
+| 51 | Streaming subprocess trigger | `subprocess.Popen` + line stream used when `config.ports` non-empty; `subprocess.run(capture_output=True)` kept otherwise | Long-running servers need real-time output; batch tasks benefit from captured stdout | 2026-03-19 |
+| 52 | Port conflict detection | `_check_port_available(host_port)` called in `provision()` before container starts; raises `OSError` | Fail-fast before container starts; avoids silent bind failure | 2026-03-19 |
 
 ---
 
