@@ -119,7 +119,31 @@ SENSITIVE_DIR_COMPONENTS: list[tuple[str, str]] = [
     (".ssh", "File is inside the SSH key directory (.ssh/)"),
 ]
 
-# (compiled_regex, pattern_string, reason) tuples — all compiled once at module load
+# ---------------------------------------------------------------------------
+# Content-scan patterns
+# ---------------------------------------------------------------------------
+#
+# Patterns are intentionally specific to avoid false positives on common
+# code constructs:
+#
+#   GOOD (should flag):   API_KEY = "sk-abc123"   or   password = 'hunter2'
+#   BAD (must NOT flag):  API_KEY = os.environ.get('KEY')  ← RHS is a call
+#                         apiKey={2}                       ← RHS is a format placeholder
+#                         secret = None                    ← RHS is None keyword
+#
+# Strategy for password/secret/api_key patterns:
+#   Require the RHS to be a quoted string literal OR a bare alphanumeric/special
+#   token that is NOT a Python/JS keyword or a format placeholder.
+#
+#   RHS anchors used:
+#     (?:"[^"\n]+"|'[^'\n]+') — a non-empty quoted string (single or double)
+#     [A-Za-z0-9+/._-]{8,}    — a bare token of 8+ chars (rules out {n}, None,
+#                                True, False, short variable names)
+#
+# The AKIA and PEM patterns are structural and do not need the same treatment.
+
+_QUOTED_OR_TOKEN = r"(?:""\"[^\"\n]+\"""|'[^'\n]+'|[A-Za-z0-9+/._\-]{8,})"
+
 SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (
         re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -132,18 +156,26 @@ SENSITIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         "PEM private key header detected",
     ),
     (
-        re.compile(r"(?i)password\s*=\s*\S+"),
-        r"(?i)password\s*=\s*\S+",
+        re.compile(
+            r"(?i)password\s*=\s*" + _QUOTED_OR_TOKEN,
+        ),
+        r"(?i)password\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
         "Hardcoded password assignment detected",
     ),
     (
-        re.compile(r"(?i)secret\s*=\s*\S+"),
-        r"(?i)secret\s*=\s*\S+",
+        re.compile(
+            r"(?i)(?:^|[\s,({])secret\s*=\s*" + _QUOTED_OR_TOKEN,
+            re.MULTILINE,
+        ),
+        r"(?i)secret\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
         "Hardcoded secret assignment detected",
     ),
     (
-        re.compile(r"(?i)api[_-]?key\s*=\s*\S+"),
-        r"(?i)api[_-]?key\s*=\s*\S+",
+        re.compile(
+            r"(?i)(?:^|[\s,({])api[_-]?key\s*=\s*" + _QUOTED_OR_TOKEN,
+            re.MULTILINE,
+        ),
+        r"(?i)api[_-]?key\s*=\s*(?:\"[^\"\n]+\"|'[^'\n]+'|[A-Za-z0-9+/._-]{8,})",
         "Hardcoded API key assignment detected",
     ),
     (

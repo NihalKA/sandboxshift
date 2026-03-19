@@ -39,13 +39,18 @@ from .base import Runtime, TaskResult
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_IMAGE = "cgr.dev/chainguard/python:latest"
+# These are the locally built sandboxshift images (see images/ directory).
+# They are based on Chainguard but include /bin/sh (BusyBox via :latest-dev
+# or wolfi-base) which is required by PodmanRuntime's /bin/sh -c invocation.
+# Using the upstream cgr.dev distroless images directly would fail because
+# those images have no shell.
+_DEFAULT_IMAGE = "sandboxshift/runtime-python:3.11"
 _NONROOT_USER = "65532:65532"  # Chainguard nonroot UID:GID — never root
 
 _MARKER_IMAGES: dict[str, str] = {
-    "requirements.txt": "cgr.dev/chainguard/python:latest",
-    "package.json": "cgr.dev/chainguard/node:latest",
-    "go.mod": "cgr.dev/chainguard/go:latest",
+    "requirements.txt": "sandboxshift/runtime-python:3.11",
+    "package.json": "sandboxshift/runtime-node:20",
+    "go.mod": "cgr.dev/chainguard/go:latest",  # V2 — no local image yet
 }
 
 # Pip package cache — persisted on the host across container runs.
@@ -81,7 +86,7 @@ class _InstanceState:
 
 
 def _detect_image(workspace: Path) -> str:
-    """Return the Chainguard image tag appropriate for this workspace.
+    """Return the sandboxshift runtime image appropriate for this workspace.
 
     Checks for marker files (requirements.txt, package.json, go.mod).
     Multiple markers → multi-runtime image. None → default Python image.
@@ -92,7 +97,7 @@ def _detect_image(workspace: Path) -> str:
         if (workspace / marker).exists()
     ]
     if len(found) > 1:
-        return "sandboxshift/runtime-multi"
+        return "sandboxshift/runtime-multi:latest"
     if len(found) == 1:
         return found[0]
     return _DEFAULT_IMAGE
@@ -162,7 +167,7 @@ class PodmanRuntime(Runtime):
 
         Steps:
           1. Validate workspace exists.
-          2. Auto-detect Chainguard image from workspace markers.
+          2. Auto-detect sandboxshift runtime image from workspace markers.
           3. Generate a unique instance_id.
           4. Resolve DNS for each domain in config.network_allow.
           5. Pre-check each host port in config.ports for availability.
