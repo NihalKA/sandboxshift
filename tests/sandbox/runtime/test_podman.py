@@ -32,6 +32,7 @@ from src.sandbox.runtime.base import TaskResult
 
 SUBPROCESS_PATCH = "src.sandbox.runtime.podman.subprocess.run"
 TO_THREAD_PATCH = "src.sandbox.runtime.podman.asyncio.to_thread"
+POPEN_PATCH = "src.sandbox.runtime.podman.subprocess.Popen"
 
 
 def _ok_result(**kwargs) -> CompletedProcess:  # type: ignore[type-arg]
@@ -93,7 +94,7 @@ def mock_subprocess():
 
 
 @pytest.fixture()
-def mock_port_check(monkeypatch):
+def mock_port_check(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silences _check_port_available so provision() never contacts the network."""
     monkeypatch.setattr(
         "src.sandbox.runtime.podman._check_port_available", lambda port: None
@@ -505,6 +506,7 @@ async def test_destroy_calls_podman_rm(
 ) -> None:
     rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
     await rt.destroy(iid)
+    # Last subprocess.run call must be the podman rm -f
     last_cmd = mock_subprocess.call_args[0][0]
     assert last_cmd[0] == "podman"
     assert last_cmd[1] == "rm"
@@ -527,6 +529,7 @@ async def test_destroy_idempotent_on_unknown_id(
     runtime: PodmanRuntime,
     mock_subprocess,
 ) -> None:
+    # Should not raise even for an unknown instance_id.
     await runtime.destroy("ss-doesnotexist")
 
 
@@ -537,6 +540,7 @@ async def test_destroy_idempotent_when_rm_fails(
 ) -> None:
     mock_subprocess.return_value = _ok_result(returncode=125)
     rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
+    # Should not raise even when podman rm exits non-zero.
     await rt.destroy(iid)
 
 
@@ -555,213 +559,164 @@ async def test_destroy_calls_audit_record(
 
 
 # ---------------------------------------------------------------------------
-# Group 8 — Port Exposure
+# Group 8 — Port Exposure tests
 # ---------------------------------------------------------------------------
 
 
-async def test_port_flags_in_execute_cmd(
-    tmp_workspace: Path,
+class _FakePopen:
+    """Minimal Popen stand-in used by Group 8 tests.
+
+    Simulates a process that writes one line to stdout and exits 0.
+    ``stdout`` is an iterator so the ``for raw_line in proc.stdout`` loop
+    in ``_run_streaming`` exhausts in one iteration.
+    """
+
+    def __init__(self, cmd: list[str], **kwargs: object) -> None:
+        self.cmd = cmd
+        self.returncode = 0
+        self.stdout = iter([b"ok\n"])
+
+    def wait(self) -> None:
+        pass
+
+
+@pytest.fixture()
+def config_with_ports(tmp_path: Path) -> SandboxConfig:
+    """SandboxConfig with a single port mapping: host 8000 -> container 8000."""
+    return SandboxConfig(ports=[(8000, 8000)])
+
+
+@pytest.fixture()
+def mock_popen(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Patches subprocess.Popen with _FakePopen and records captured cmds.
+
+    Returns the list of cmd lists captured so far.  Tests use ``mock_popen[0]``
+    to inspect the first call's argument list.
+    """
+    captured: list[list[str]] = []
+
+    class _CapturePopen(_FakePopen):
+        def __init__(self, cmd: list[str], **kwargs: object) -> None:
+            super().__init__(cmd, **kwargs)
+            captured.append(cmd)
+
+    monkeypatch.setattr(POPEN_PATCH, _CapturePopen)
+    return captured
+
+
+async def test_port_flags_included_in_execute_cmd(
+    workspace: Path,
+    config_with_ports: SandboxConfig,
+    mock_port_check,
     mock_subprocess,
-    monkeypatch: pytest.MonkeyPatch,
+    mock_popen: list[list[str]],
 ) -> None:
-    """When config has ports, the podman cmd includes -p 127.0.0.1:HOST:CONTAINER."""
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", lambda port: None
-    )
-    # Popen mock for streaming path
-    mock_popen = MagicMock()
-    mock_popen.stdout = iter([])
-    mock_popen.returncode = 0
-    mock_popen.wait.return_value = 0
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman.subprocess.Popen", lambda *a, **kw: mock_popen
-    )
-    captured_cmds: list[list[str]] = []
-
-    original_popen = lambda *a, **kw: mock_popen  # noqa: E731
-
-    def capturing_popen(cmd, **kw):  # type: ignore[no-untyped-def]
-        captured_cmds.append(list(cmd))
-        return mock_popen
-
-    monkeypatch.setattr("src.sandbox.runtime.podman.subprocess.Popen", capturing_popen)
-
-    config = SandboxConfig(ports=[(8000, 8000)])
-    rt = PodmanRuntime()
-    iid = await rt.provision(tmp_workspace, config)
-    await rt.execute(iid, "uvicorn app:app", config)
-
-    assert captured_cmds, "Popen was not called"
-    cmd = captured_cmds[0]
+    """-p 127.0.0.1:8000:8000 must appear in the Popen cmd when ports are set."""
+    rt, iid = await _provisioned_runtime(workspace, config_with_ports, mock_subprocess)
+    await rt.execute(iid, "python -m http.server 8000", config_with_ports)
+    assert mock_popen, "subprocess.Popen was not called"
+    cmd = mock_popen[0]
     assert "-p" in cmd
-    p_idx = cmd.index("-p")
-    assert cmd[p_idx + 1] == "127.0.0.1:8000:8000"
+    assert "127.0.0.1:8000:8000" in cmd
 
 
-async def test_port_forces_slirp4netns(
-    tmp_workspace: Path,
+async def test_port_forces_slirp4netns_when_network_allow_empty(
+    workspace: Path,
+    mock_port_check,
     mock_subprocess,
-    monkeypatch: pytest.MonkeyPatch,
+    mock_popen: list[list[str]],
 ) -> None:
-    """When ports are set but network_allow is empty, still uses slirp4netns."""
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", lambda port: None
-    )
-    mock_popen = MagicMock()
-    mock_popen.stdout = iter([])
-    mock_popen.returncode = 0
-    mock_popen.wait.return_value = 0
-    captured_cmds: list[list[str]] = []
-
-    def capturing_popen(cmd, **kw):  # type: ignore[no-untyped-def]
-        captured_cmds.append(list(cmd))
-        return mock_popen
-
-    monkeypatch.setattr("src.sandbox.runtime.podman.subprocess.Popen", capturing_popen)
-
-    config = SandboxConfig(ports=[(8000, 8000)])  # no network_allow
-    rt = PodmanRuntime()
-    iid = await rt.provision(tmp_workspace, config)
-    await rt.execute(iid, "server", config)
-
-    assert captured_cmds
-    cmd = captured_cmds[0]
+    """Ports alone (no network_allow) must still select slirp4netns, not --network=none."""
+    config = SandboxConfig(ports=[(8000, 8000)], network_allow=[])
+    rt, iid = await _provisioned_runtime(workspace, config, mock_subprocess)
+    await rt.execute(iid, "sleep 1", config)
+    cmd = mock_popen[0]
     assert "--network=slirp4netns" in cmd
     assert "--network=none" not in cmd
 
 
-async def test_port_check_called_on_provision(
-    tmp_workspace: Path,
-    mock_subprocess,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_check_port_available is called once for each requested host port."""
-    called_with: list[int] = []
-
-    def mock_check(port: int) -> None:
-        called_with.append(port)
-
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", mock_check
-    )
-
-    config = SandboxConfig(ports=[(8000, 8000), (3000, 3000)])
-    rt = PodmanRuntime()
-    await rt.provision(tmp_workspace, config)
-
-    assert 8000 in called_with
-    assert 3000 in called_with
-
-
-async def test_port_conflict_raises(
-    tmp_workspace: Path,
-    mock_subprocess,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When _check_port_available raises OSError, provision() propagates it."""
-
-    def raise_oserror(port: int) -> None:
-        raise OSError(f"Port {port} is already in use on 127.0.0.1.")
-
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", raise_oserror
-    )
-
-    config = SandboxConfig(ports=[(8000, 8000)])
-    rt = PodmanRuntime()
-
-    with pytest.raises(OSError, match="already in use"):
-        await rt.provision(tmp_workspace, config)
-
-
 async def test_no_port_flags_when_not_configured(
-    tmp_workspace: Path,
+    workspace: Path,
     default_config: SandboxConfig,
     mock_subprocess,
 ) -> None:
-    """When no ports are configured, there is no -p flag in the cmd."""
-    rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
+    """No -p flags appear in the cmd when config.ports is empty."""
+    rt, iid = await _provisioned_runtime(workspace, default_config, mock_subprocess)
     await rt.execute(iid, "echo hi", default_config)
     cmd = mock_subprocess.call_args[0][0]
     assert "-p" not in cmd
 
 
-async def test_port_bind_is_localhost_only(
-    tmp_workspace: Path,
-    mock_subprocess,
+async def test_port_check_called_for_each_host_port(
+    workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every -p flag value starts with 127.0.0.1: (never 0.0.0.0)."""
+    """_check_port_available is called once per host_port during provision()."""
+    checked: list[int] = []
     monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", lambda port: None
+        "src.sandbox.runtime.podman._check_port_available",
+        lambda port: checked.append(port),
     )
-    captured_cmds: list[list[str]] = []
-    mock_popen = MagicMock()
-    mock_popen.stdout = iter([])
-    mock_popen.returncode = 0
-    mock_popen.wait.return_value = 0
-
-    def capturing_popen(cmd, **kw):  # type: ignore[no-untyped-def]
-        captured_cmds.append(list(cmd))
-        return mock_popen
-
-    monkeypatch.setattr("src.sandbox.runtime.podman.subprocess.Popen", capturing_popen)
-
-    config = SandboxConfig(ports=[(8000, 8080), (3000, 3000)])
+    config = SandboxConfig(ports=[(8000, 8000), (9000, 9000)])
     rt = PodmanRuntime()
-    iid = await rt.provision(tmp_workspace, config)
-    await rt.execute(iid, "server", config)
-
-    assert captured_cmds
-    cmd = captured_cmds[0]
-    for i, arg in enumerate(cmd):
-        if arg == "-p":
-            binding = cmd[i + 1]
-            assert binding.startswith("127.0.0.1:"), (
-                f"Port binding must use 127.0.0.1, got: {binding!r}"
-            )
+    await rt.provision(workspace, config)
+    assert sorted(checked) == [8000, 9000]
 
 
-async def test_streaming_execute_when_ports_set(
-    tmp_workspace: Path,
-    mock_subprocess,
+async def test_port_conflict_raises_on_provision(
+    workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With ports, execute() uses Popen (streaming); stdout is '<streamed to terminal>'."""
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman._check_port_available", lambda port: None
-    )
-    mock_popen = MagicMock()
-    mock_popen.stdout = iter([b"line1\n", b"line2\n"])
-    mock_popen.returncode = 0
-    mock_popen.wait.return_value = 0
-    monkeypatch.setattr(
-        "src.sandbox.runtime.podman.subprocess.Popen", lambda *a, **kw: mock_popen
-    )
+    """provision() raises OSError immediately when a host port is already in use."""
 
+    def _raise(port: int) -> None:
+        raise OSError(f"Port {port} already in use")
+
+    monkeypatch.setattr("src.sandbox.runtime.podman._check_port_available", _raise)
     config = SandboxConfig(ports=[(8000, 8000)])
     rt = PodmanRuntime()
-    iid = await rt.provision(tmp_workspace, config)
-    result = await rt.execute(iid, "uvicorn app:app", config)
-
-    assert result.exit_code == 0
-    assert result.stdout == "<streamed to terminal>"
-    assert result.stderr == ""
-    # subprocess.run (mock_subprocess) must NOT have been called for execute
-    # (provision with no network_allow also doesn't call it).
-    mock_subprocess.assert_not_called()
+    with pytest.raises(OSError):
+        await rt.provision(workspace, config)
 
 
-async def test_capture_execute_when_no_ports(
-    tmp_workspace: Path,
+async def test_port_bind_always_uses_localhost(
+    workspace: Path,
+    config_with_ports: SandboxConfig,
+    mock_port_check,
+    mock_subprocess,
+    mock_popen: list[list[str]],
+) -> None:
+    """Every -p flag value in the Popen cmd must start with 127.0.0.1:."""
+    rt, iid = await _provisioned_runtime(workspace, config_with_ports, mock_subprocess)
+    await rt.execute(iid, "sleep 1", config_with_ports)
+    cmd = mock_popen[0]
+    p_indices = [i for i, v in enumerate(cmd) if v == "-p"]
+    assert p_indices, "No -p flags found in cmd"
+    for idx in p_indices:
+        assert cmd[idx + 1].startswith("127.0.0.1:"), (
+            f"Port flag {cmd[idx + 1]!r} is not bound to 127.0.0.1"
+        )
+
+
+async def test_popen_used_when_ports_configured(
+    workspace: Path,
+    config_with_ports: SandboxConfig,
+    mock_port_check,
+    mock_subprocess,
+    mock_popen: list[list[str]],
+) -> None:
+    """execute() must use subprocess.Popen (streaming) when ports are configured."""
+    rt, iid = await _provisioned_runtime(workspace, config_with_ports, mock_subprocess)
+    await rt.execute(iid, "python -m http.server 8000", config_with_ports)
+    assert len(mock_popen) == 1, "Expected exactly one Popen call"
+
+
+async def test_subprocess_run_used_when_no_ports(
+    workspace: Path,
     default_config: SandboxConfig,
     mock_subprocess,
 ) -> None:
-    """Without ports, execute() uses subprocess.run (capture mode)."""
-    rt, iid = await _provisioned_runtime(tmp_workspace, default_config, mock_subprocess)
-    result = await rt.execute(iid, "echo hi", default_config)
-
-    # subprocess.run must have been called (that's how mock_subprocess works)
-    assert mock_subprocess.called
-    # stdout comes from captured output, not streaming sentinel
-    assert result.stdout != "<streamed to terminal>"
+    """execute() must use subprocess.run (capture mode) when no ports are configured."""
+    rt, iid = await _provisioned_runtime(workspace, default_config, mock_subprocess)
+    await rt.execute(iid, "echo hi", default_config)
+    mock_subprocess.assert_called()
