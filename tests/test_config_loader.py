@@ -66,6 +66,26 @@ def test_load_resources(tmp_path: Path) -> None:
     assert result.get("memory_limit_mb") == 8192
 
 
+def test_load_resources_memory_gb_string(tmp_path: Path) -> None:
+    """resources.memory '4GB' string is converted to 4096 MB."""
+    (tmp_path / "sandboxshift.yaml").write_text(
+        "resources:\n  memory: 4GB\n",
+        encoding="utf-8",
+    )
+    result = load_workspace_config(tmp_path)
+    assert result.get("memory_limit_mb") == 4096
+
+
+def test_load_resources_memory_mb_string(tmp_path: Path) -> None:
+    """resources.memory '2048MB' string is parsed correctly."""
+    (tmp_path / "sandboxshift.yaml").write_text(
+        "resources:\n  memory: 2048MB\n",
+        encoding="utf-8",
+    )
+    result = load_workspace_config(tmp_path)
+    assert result.get("memory_limit_mb") == 2048
+
+
 def test_load_sandbox_timeout_and_setup(tmp_path: Path) -> None:
     """sandbox.timeout → timeout_seconds; sandbox.setup → setup_command."""
     (tmp_path / "sandboxshift.yaml").write_text(

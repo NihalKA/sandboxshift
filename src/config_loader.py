@@ -26,7 +26,7 @@ def load_workspace_config(workspace_path: Path) -> dict:  # type: ignore[type-ar
     - ``setup_command``    (str | None)
     - ``network_allow``    (list[str])
     - ``cpu_limit``        (float)
-    - ``memory_limit_mb``  (int)
+    - ``memory_limit_mb``  (int)  — supports raw ints, "4GB", "2048MB" strings
     - ``ports``            (list[tuple[int, int]])
 
     Port strings like ``"8000:8000"`` are converted to ``(8000, 8000)`` tuples.
@@ -90,7 +90,13 @@ def load_workspace_config(workspace_path: Path) -> dict:  # type: ignore[type-ar
                 pass
         if "memory" in resources:
             try:
-                result["memory_limit_mb"] = int(resources["memory"])
+                mem_val = resources["memory"]
+                if isinstance(mem_val, str) and mem_val.upper().endswith("GB"):
+                    result["memory_limit_mb"] = int(float(mem_val[:-2]) * 1024)
+                elif isinstance(mem_val, str) and mem_val.upper().endswith("MB"):
+                    result["memory_limit_mb"] = int(float(mem_val[:-2]))
+                else:
+                    result["memory_limit_mb"] = int(mem_val)
             except (TypeError, ValueError):
                 pass
 
