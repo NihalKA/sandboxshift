@@ -100,6 +100,10 @@ class RunRequest(BaseModel):
             "If set, executed as `setup_command && task` in a single /bin/sh invocation."
         ),
     )
+    ports: list[str] | None = Field(
+        default=None,
+        description="Ports to expose as HOST:CONTAINER strings (e.g. ['8000:8000'])",
+    )
 
     @field_validator("workspace")
     @classmethod
@@ -156,6 +160,30 @@ class RunRequest(BaseModel):
                     f"allowed_hosts entry is not a valid FQDN: {entry!r}"
                 )
         return entries
+
+    @field_validator("ports", mode="before")
+    @classmethod
+    def _validate_ports(cls, v: list[str] | None) -> list[str] | None:
+        """Validate each port string is HOST:CONTAINER with integers in 1–65535.
+
+        Raises:
+            ValueError: If any entry is malformed or out of range.
+        """
+        if v is None:
+            return v
+        validated = []
+        for p in v:
+            parts = str(p).split(":")
+            if len(parts) != 2:
+                raise ValueError(f"Invalid port '{p}': expected HOST:CONTAINER")
+            try:
+                h, c = int(parts[0]), int(parts[1])
+            except ValueError:
+                raise ValueError(f"Port numbers in '{p}' must be integers")
+            if not (1 <= h <= 65535) or not (1 <= c <= 65535):
+                raise ValueError(f"Port numbers in '{p}' must be 1-65535")
+            validated.append(p)
+        return validated
 
 
 class RunResponse(BaseModel):

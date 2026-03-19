@@ -1,4 +1,4 @@
-"""Tests for SandboxShift FastAPI routes — 26 tests across 6 groups.
+"""Tests for SandboxShift FastAPI routes — 29 tests across 8 groups.
 
 Conventions:
   - asyncio_mode = "auto" is set in pyproject.toml; @pytest.mark.asyncio is NEVER used.
@@ -77,7 +77,7 @@ async def client(tmp_path):
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
-    """Convenience fixture — returns tmp_path as the workspace for Group 7 tests."""
+    """Convenience fixture — returns tmp_path as the workspace for port tests."""
     return tmp_path
 
 
@@ -453,3 +453,53 @@ async def test_run_setup_command_null_json_maps_to_none(
     assert resp.status_code == 200
     call_kwargs = mock_manager.run.call_args.kwargs
     assert call_kwargs["config"].setup_command is None
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — Port Exposure
+# ---------------------------------------------------------------------------
+
+
+async def test_post_run_with_ports_passes_tuples_to_config(
+    client,
+    workspace: Path,
+) -> None:
+    """ports=["8000:8000"] in the request body is converted to [(8000, 8000)] in SandboxConfig."""
+    ac, mock_manager, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python server.py",
+        "ports": ["8000:8000"],
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_manager.run.call_args.kwargs
+    assert call_kwargs["config"].ports == [(8000, 8000)]
+
+
+async def test_post_run_invalid_port_format_returns_422(
+    client,
+    workspace: Path,
+) -> None:
+    """ports=["notaport"] fails Pydantic validation → 422 Unprocessable Entity."""
+    ac, _, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python server.py",
+        "ports": ["notaport"],
+    })
+    assert resp.status_code == 422
+
+
+async def test_post_run_no_ports_field_defaults_empty(
+    client,
+    workspace: Path,
+) -> None:
+    """Omitting ports from the request body → SandboxConfig.ports is []."""
+    ac, mock_manager, _ = client
+    resp = await ac.post("/run", json={
+        "workspace": str(workspace),
+        "task": "python main.py",
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_manager.run.call_args.kwargs
+    assert call_kwargs["config"].ports == []

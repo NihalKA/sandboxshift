@@ -25,12 +25,20 @@ ManagerDep = Annotated[Any, Depends(_get_manager)]
 
 @router.post("/run", response_model=RunResponse)
 async def run_sandbox(body: RunRequest, manager: ManagerDep) -> RunResponse:
+    # Parse port strings into (host, container) tuples.
+    parsed_ports: list[tuple[int, int]] = []
+    if body.ports:
+        for p in body.ports:
+            h, c = p.split(":")
+            parsed_ports.append((int(h), int(c)))
+
     config = SandboxConfig(
         timeout_seconds=body.timeout if body.timeout is not None else SandboxConfig().timeout_seconds,
         memory_limit_mb=body.memory_mb if body.memory_mb is not None else SandboxConfig().memory_limit_mb,
         cpu_limit=body.cpu if body.cpu is not None else SandboxConfig().cpu_limit,
         network_allow=body.allowed_hosts if body.allowed_hosts is not None else [],
         setup_command=body.setup_command,
+        ports=parsed_ports,
     )
     try:
         result = await manager.run(workspace=Path(body.workspace), task=body.task, config=config)
