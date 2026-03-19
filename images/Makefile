@@ -8,13 +8,14 @@
 #   make push-all            Push all three images to IMAGE_REGISTRY
 #
 # Platform:
-#   Auto-detected from the Podman VM (macOS) or uname -m (Linux).
-#   The Podman VM arch is what matters — NOT the macOS host arch.
-#   On macOS, `podman machine init` defaults to amd64 even on Apple Silicon.
+#   Auto-detected from the running Podman daemon via:
+#     podman info --format '{{.Host.Arch}}'
+#   This returns the arch of the VM/daemon (e.g. amd64 or arm64) which is
+#   what the built image must match — NOT the macOS host uname -m.
 #
-#   Override explicitly when needed:
-#     PLATFORM=linux/amd64 make build-all   # for AWS Fargate / amd64 VM
-#     PLATFORM=linux/arm64 make build-all   # for arm64 native VM
+#   Override when needed:
+#     PLATFORM=linux/amd64 make build-all   # for AWS Fargate
+#     PLATFORM=linux/arm64 make build-all   # for arm64 VM
 #
 # Override the registry for private ECR or GHCR:
 #   IMAGE_REGISTRY=123456789.dkr.ecr.us-east-1.amazonaws.com make push-all
@@ -22,19 +23,18 @@
 IMAGE_REGISTRY ?= docker.io
 IMAGE_PREFIX   ?= sandboxshift
 
-# Detect the Podman VM arch (macOS) or fall back to uname -m (Linux/CI).
-# `podman machine info` outputs e.g. "MachineState: Running" and "Arch: amd64"
-# grep + awk extracts the value; the shell returns empty string on failure.
-_PODMAN_ARCH := $(shell podman machine info 2>/dev/null | grep -i "^  Arch:" | awk '{print $$2}')
+# Ask the running Podman daemon for its arch — this is the ground truth.
+# Falls back to uname -m mapping if podman is not running (CI / Linux native).
+_PODMAN_ARCH := $(shell podman info --format '{{.Host.Arch}}' 2>/dev/null)
 ifneq ($(_PODMAN_ARCH),)
-  # Running on macOS with a live Podman machine — use its arch.
   PLATFORM ?= linux/$(_PODMAN_ARCH)
 else
-  # Linux native or CI — use the host uname.
   _UNAME_M := $(shell uname -m)
   ifeq ($(_UNAME_M),x86_64)
     PLATFORM ?= linux/amd64
   else ifeq ($(_UNAME_M),aarch64)
+    PLATFORM ?= linux/arm64
+  else ifeq ($(_UNAME_M),arm64)
     PLATFORM ?= linux/arm64
   else
     PLATFORM ?= linux/$(_UNAME_M)
@@ -47,10 +47,12 @@ MULTI_TAG  := $(IMAGE_REGISTRY)/$(IMAGE_PREFIX)/runtime-multi:latest
 
 .PHONY: build-all build-python build-node build-multi push-all info
 
-# Print detected platform — useful for confirming the right arch before building.
+# Print detected platform — confirm this matches your Podman VM before building.
 info:
-	@echo "Detected PLATFORM: $(PLATFORM)"
-	@echo "  (override with: PLATFORM=linux/amd64 make build-all)"
+	@echo "Podman daemon arch: $(_PODMAN_ARCH)"
+	@echo "Building for PLATFORM: $(PLATFORM)"
+	@echo ""
+	@echo "To override: PLATFORM=linux/amd64 make build-all"
 
 build-python:
 	podman build --platform $(PLATFORM) -t $(PYTHON_TAG) ./python
