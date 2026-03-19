@@ -487,9 +487,11 @@ def test_yaml_ports_loaded_when_no_cli_port(
 ) -> None:
     """When load_workspace_config returns ports, they appear in SandboxConfig even with no --port flag."""
     _, instance = mock_manager
-    # Override the load_workspace_config mock set by the fixture.
+    # Use the module object (not the string path) — "sandboxshift.cli.main" resolves
+    # to the main *function* due to __init__.py shadowing. Same pattern as _SENSITIVE_ROOTS.
     monkeypatch.setattr(
-        "sandboxshift.cli.main.load_workspace_config",
+        _cli_main_module,
+        "load_workspace_config",
         lambda _: {"ports": [(8000, 8000)]},
     )
     monkeypatch.setattr(sys, "argv", [
