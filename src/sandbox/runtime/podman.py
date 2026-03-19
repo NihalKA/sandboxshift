@@ -44,6 +44,22 @@ _MARKER_IMAGES: dict[str, str] = {
     "go.mod": "cgr.dev/chainguard/go:latest",
 }
 
+# Pip package cache — persisted on the host across container runs.
+# Container path matches Chainguard nonroot user (UID 65532) home in /home/nonroot.
+_PIP_CACHE_CONTAINER_PATH: str = "/home/nonroot/.cache/pip"
+
+
+def _pip_cache_host_path() -> Path:
+    """Return the host-side pip cache directory path.
+
+    Implemented as a function (not a module-level constant) so tests can
+    monkeypatch it cleanly without patching Path.home() globally.
+
+    Returns:
+        Path: ``~/.sandboxshift/cache/pip``
+    """
+    return Path.home() / ".sandboxshift" / "cache" / "pip"
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -180,6 +196,15 @@ class PodmanRuntime(Runtime):
     ) -> TaskResult:
         """Execute a shell task in the provisioned sandbox.
 
+        If ``state.config.setup_command`` is set, it is prepended to the task
+        as ``setup_command && task`` inside a single ``/bin/sh -c`` invocation.
+        This keeps the setup and main task within the same container lifecycle,
+        sharing the same filesystem, network, and timeout budget.
+
+        A pip package cache directory (``~/.sandboxshift/cache/pip`` on the host)
+        is always mounted at ``/home/nonroot/.cache/pip`` inside the container so
+        that packages installed via pip or uv are reused across runs.
+
         Args:
             instance_id: Returned by provision().
             task:        Shell command string, wrapped in /bin/sh -c.
@@ -205,6 +230,23 @@ class PodmanRuntime(Runtime):
         ro_suffix = ":ro" if state.config.workspace_readonly else ""
         volume_flag = f"{state.workspace}:/workspace{ro_suffix}"
 
+        # Ensure the pip cache directory exists on the host before Podman mounts it.
+        # mkdir(parents=True, exist_ok=True) is idempotent — safe on every execute().
+        pip_cache_host = _pip_cache_host_path()
+        try:
+            pip_cache_host.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # Non-fatal: pip cache just won't persist for this run
+        pip_cache_volume_flag = f"{pip_cache_host}:{_PIP_CACHE_CONTAINER_PATH}"
+
+        # Compose setup + task into a single shell string if setup_command is set.
+        # Empty string is treated as falsy — no accidental " && task" composition.
+        shell_cmd = (
+            f"{state.config.setup_command} && {task}"
+            if state.config.setup_command
+            else task
+        )
+
         cmd: list[str] = [
             "podman",
             "run",
@@ -219,6 +261,8 @@ class PodmanRuntime(Runtime):
             f"{state.config.memory_limit_mb}m",
             "--volume",
             volume_flag,
+            "--volume",
+            pip_cache_volume_flag,
             "--workdir",
             "/workspace",
             "--security-opt",
@@ -227,7 +271,7 @@ class PodmanRuntime(Runtime):
             state.image,
             "/bin/sh",
             "-c",
-            task,
+            shell_cmd,
         ]
 
         t_start = time.perf_counter()
@@ -244,6 +288,7 @@ class PodmanRuntime(Runtime):
             {
                 "event": "execute",
                 "instance_id": instance_id,
+                "setup_command": state.config.setup_command,
                 "task": task,
                 "exit_code": result.returncode,
                 "duration_seconds": round(duration, 3),

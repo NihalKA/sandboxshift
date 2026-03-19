@@ -145,6 +145,7 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         memory_limit_mb=args.memory_mb,
         network_allow=args.allow or [],
         timeout_seconds=args.timeout,
+        setup_command=args.setup,
     )
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
@@ -246,6 +247,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--allow", nargs="*", metavar="FQDN", default=None)
     run_p.add_argument("--audit-log", default=None, dest="audit_log")
     run_p.add_argument("--ram-threshold", type=float, default=4.0, dest="ram_threshold")
+    run_p.add_argument(
+        "--setup",
+        default=None,
+        metavar="CMD",
+        dest="setup",
+        help="Shell command to run before the main task (e.g. 'pip install -r requirements.txt').",
+    )
 
     # --- audit ---
     audit_p = subparsers.add_parser("audit", help="Work with audit logs.")

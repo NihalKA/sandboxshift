@@ -30,6 +30,7 @@ async def run_sandbox(body: RunRequest, manager: ManagerDep) -> RunResponse:
         memory_limit_mb=body.memory_mb if body.memory_mb is not None else SandboxConfig().memory_limit_mb,
         cpu_limit=body.cpu if body.cpu is not None else SandboxConfig().cpu_limit,
         network_allow=body.allowed_hosts if body.allowed_hosts is not None else [],
+        setup_command=body.setup_command,
     )
     try:
         result = await manager.run(workspace=Path(body.workspace), task=body.task, config=config)

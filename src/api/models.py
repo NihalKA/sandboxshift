@@ -93,6 +93,13 @@ class RunRequest(BaseModel):
             "Private/link-local ranges are also blocked."
         ),
     )
+    setup_command: str | None = Field(
+        default=None,
+        description=(
+            "Optional shell command to run before the main task inside the container. "
+            "If set, executed as `setup_command && task` in a single /bin/sh invocation."
+        ),
+    )
 
     @field_validator("workspace")
     @classmethod
