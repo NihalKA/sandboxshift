@@ -54,14 +54,16 @@ info:
 	@echo ""
 	@echo "To override: PLATFORM=linux/amd64 make build-all"
 
+# --pull=always ensures the base image is always fetched for the correct
+# platform and never reused from a stale wrong-arch local cache.
 build-python:
-	podman build --platform $(PLATFORM) -t $(PYTHON_TAG) ./python
+	podman build --platform $(PLATFORM) --pull=always -t $(PYTHON_TAG) ./python
 
 build-node:
-	podman build --platform $(PLATFORM) -t $(NODE_TAG) ./node
+	podman build --platform $(PLATFORM) --pull=always -t $(NODE_TAG) ./node
 
 build-multi:
-	podman build --platform $(PLATFORM) -t $(MULTI_TAG) ./multi
+	podman build --platform $(PLATFORM) --pull=always -t $(MULTI_TAG) ./multi
 
 build-all: build-python build-node build-multi
 
