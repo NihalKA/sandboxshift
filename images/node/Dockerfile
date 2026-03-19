@@ -16,10 +16,9 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-node" \
 
 WORKDIR /workspace
 
-# Install uv via Wolfi APK (pip not available in the node image).
-# Available to UID 65532 at runtime for dependency installation.
-RUN apk add --no-cache uv \
-    && rm -rf /var/cache/apk/*
+# Node projects use npm/yarn/pnpm — no Python tooling needed here.
+# uv (Python package manager) is available in runtime-python and runtime-multi.
+# The Chainguard node image locks its APK database, so apk add is not used.
 
 # UID 65532 — Chainguard nonroot; matches _NONROOT_USER in podman.py.
 USER 65532:65532
