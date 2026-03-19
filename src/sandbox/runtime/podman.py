@@ -7,10 +7,13 @@ Runs agent tasks inside rootless Podman containers with:
 - --security-opt=no-new-privileges (prevents setuid escalation)
 - Workspace-only volume mount (no host path leakage)
 - Full audit trail via AuditLogger (Security Layer 7)
+- Port exposure bound exclusively to 127.0.0.1 (Decision #50)
 
 All Podman CLI calls go through asyncio.to_thread(subprocess.run, ...)
 so the event loop is never blocked. subprocess.run is the sole integration
-point — tests mock it exclusively. No real containers are created in tests.
+point for non-port tasks — tests mock it exclusively.  When ports are
+configured, subprocess.Popen is used for real-time stdout streaming
+(Decision #51).  No real containers are created in tests.
 
 --privileged is NEVER passed. This is enforced by construction — the flag
 does not appear anywhere in this module.
@@ -21,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -107,6 +111,29 @@ def _resolve_host(domain: str) -> str | None:
         return None
 
 
+def _check_port_available(host_port: int) -> None:
+    """Raise OSError if *host_port* is already in use on 127.0.0.1.
+
+    Uses a temporary socket bind as a pre-flight check.  Fails fast before
+    the container starts so the user gets a clear error message rather than
+    a silent Podman bind failure (Decision #52).
+
+    Args:
+        host_port: TCP port number to test on the loopback interface.
+
+    Raises:
+        OSError: If the port is already bound by another process.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", host_port))
+        except OSError:
+            raise OSError(
+                f"Port {host_port} is already in use on 127.0.0.1. "
+                "Free the port and retry."
+            )
+
+
 # ---------------------------------------------------------------------------
 # PodmanRuntime
 # ---------------------------------------------------------------------------
@@ -117,6 +144,10 @@ class PodmanRuntime(Runtime):
 
     All Podman CLI calls are made via asyncio.to_thread(subprocess.run, ...)
     so the async event loop is never blocked.
+
+    When ``config.ports`` is non-empty, ``execute()`` switches to
+    ``subprocess.Popen`` with real-time stdout streaming so server output
+    is visible immediately in the terminal (Decision #51).
 
     Args:
         audit_logger: Optional AuditLogger instance. Defaults to the V1 stub.
@@ -134,19 +165,23 @@ class PodmanRuntime(Runtime):
           2. Auto-detect Chainguard image from workspace markers.
           3. Generate a unique instance_id.
           4. Resolve DNS for each domain in config.network_allow.
-          5. Store _InstanceState keyed by instance_id.
-          6. Record audit event.
-          7. Return instance_id.
+          5. Pre-check each host port in config.ports for availability.
+          6. Store _InstanceState keyed by instance_id.
+          7. Record audit event.
+          8. Return instance_id.
 
         Args:
             workspace: Directory to mount into the container. Must exist.
-            config:    Sandbox configuration (CPU, RAM, network policy, timeout).
+            config:    Sandbox configuration (CPU, RAM, network policy, timeout,
+                       ports).
 
         Returns:
             Opaque instance_id string (format: "ss-{12 hex chars}").
 
         Raises:
             FileNotFoundError: If workspace does not exist.
+            OSError:           If any requested host port is already in use
+                               (Decision #52 — fail fast before container starts).
         """
         if not workspace.exists():
             raise FileNotFoundError(f"workspace does not exist: {workspace}")
@@ -170,6 +205,12 @@ class PodmanRuntime(Runtime):
                     }
                 )
 
+        # Pre-check port availability (Decision #52).
+        # Fail fast with a clear error before starting the container.
+        # _check_port_available is a fast socket bind — called synchronously.
+        for host_port, _container_port in config.ports:
+            _check_port_available(host_port)
+
         self._instances[instance_id] = _InstanceState(
             image=image,
             workspace=workspace,
@@ -183,6 +224,7 @@ class PodmanRuntime(Runtime):
                 "instance_id": instance_id,
                 "image": image,
                 "workspace": str(workspace),
+                "ports": [[h, c] for h, c in config.ports],
             }
         )
 
@@ -198,28 +240,24 @@ class PodmanRuntime(Runtime):
 
         If ``state.config.setup_command`` is set, it is prepended to the task
         as ``setup_command && task`` inside a single ``/bin/sh -c`` invocation.
-        This keeps the setup and main task within the same container lifecycle,
-        sharing the same filesystem, network, and timeout budget.
 
-        A pip package cache directory (``~/.sandboxshift/cache/pip`` on the host)
-        is always mounted at ``/home/nonroot/.cache/pip`` inside the container so
-        that packages installed via pip or uv are reused across runs.
+        If ``state.config.ports`` is non-empty, ``subprocess.Popen`` is used
+        with real-time stdout streaming so server logs appear immediately in the
+        terminal.  The returned ``TaskResult.stdout`` is
+        ``"<streamed to terminal>"`` in that case (Decision #51).
 
         Args:
             instance_id: Returned by provision().
             task:        Shell command string, wrapped in /bin/sh -c.
             config:      Accepted for ABC compatibility — unused in V1.
-                         All execution parameters come from the stored _InstanceState.
 
         Returns:
             TaskResult with exit_code, stdout, stderr, and duration_seconds.
-            A non-zero exit_code is NOT raised — it is returned in TaskResult.
 
         Raises:
-            RuntimeError:            If instance_id was not returned by a prior provision().
-            subprocess.TimeoutExpired: If the task exceeds config.timeout_seconds.
-                                       Callers (SandboxManager) must call destroy() in
-                                       their finally block.
+            RuntimeError:             If instance_id was not returned by a prior provision().
+            subprocess.TimeoutExpired: If the task exceeds config.timeout_seconds
+                                       (capture mode only).
         """
         state = self._instances.get(instance_id)
         if state is None:
@@ -230,22 +268,23 @@ class PodmanRuntime(Runtime):
         ro_suffix = ":ro" if state.config.workspace_readonly else ""
         volume_flag = f"{state.workspace}:/workspace{ro_suffix}"
 
-        # Ensure the pip cache directory exists on the host before Podman mounts it.
-        # mkdir(parents=True, exist_ok=True) is idempotent — safe on every execute().
         pip_cache_host = _pip_cache_host_path()
         try:
             pip_cache_host.mkdir(parents=True, exist_ok=True)
         except OSError:
-            pass  # Non-fatal: pip cache just won't persist for this run
+            pass
         pip_cache_volume_flag = f"{pip_cache_host}:{_PIP_CACHE_CONTAINER_PATH}"
 
-        # Compose setup + task into a single shell string if setup_command is set.
-        # Empty string is treated as falsy — no accidental " && task" composition.
         shell_cmd = (
             f"{state.config.setup_command} && {task}"
             if state.config.setup_command
             else task
         )
+
+        # Build port publish flags — always bound to 127.0.0.1 (Decision #50).
+        port_flags: list[str] = []
+        for h, c in state.config.ports:
+            port_flags.extend(["-p", f"127.0.0.1:{h}:{c}"])
 
         cmd: list[str] = [
             "podman",
@@ -268,6 +307,7 @@ class PodmanRuntime(Runtime):
             "--security-opt",
             "no-new-privileges",
             *network_flags,
+            *port_flags,
             state.image,
             "/bin/sh",
             "-c",
@@ -275,32 +315,79 @@ class PodmanRuntime(Runtime):
         ]
 
         t_start = time.perf_counter()
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=state.config.timeout_seconds,
-        )
-        duration = time.perf_counter() - t_start
 
-        self._audit.record(
-            {
-                "event": "execute",
-                "instance_id": instance_id,
-                "setup_command": state.config.setup_command,
-                "task": task,
-                "exit_code": result.returncode,
-                "duration_seconds": round(duration, 3),
-            }
-        )
+        if state.config.ports:
+            # Streaming mode — long-running servers need real-time output.
+            # Uses Popen so stdout lines are written to the terminal as they
+            # arrive.  asyncio.to_thread keeps the event loop unblocked.
+            def _run_streaming() -> int:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    # Decode and print — print() works in all environments
+                    # including pytest capture mode (no .buffer needed).
+                    text = raw_line.decode("utf-8", errors="replace")
+                    print(text, end="", flush=True)
+                proc.wait()
+                return proc.returncode
 
-        return TaskResult(
-            exit_code=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration_seconds=duration,
-        )
+            exit_code = await asyncio.to_thread(_run_streaming)
+            duration = time.perf_counter() - t_start
+
+            self._audit.record(
+                {
+                    "event": "execute",
+                    "instance_id": instance_id,
+                    "setup_command": state.config.setup_command,
+                    "task": task,
+                    "exit_code": exit_code,
+                    "duration_seconds": round(duration, 3),
+                    "ports": [[h, c] for h, c in state.config.ports],
+                    "streaming": True,
+                }
+            )
+
+            return TaskResult(
+                exit_code=exit_code,
+                stdout="<streamed to terminal>",
+                stderr="",
+                duration_seconds=duration,
+            )
+
+        else:
+            # Capture mode — batch tasks; collect stdout/stderr for the caller.
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=state.config.timeout_seconds,
+            )
+            duration = time.perf_counter() - t_start
+
+            self._audit.record(
+                {
+                    "event": "execute",
+                    "instance_id": instance_id,
+                    "setup_command": state.config.setup_command,
+                    "task": task,
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(duration, 3),
+                    "ports": [],
+                    "streaming": False,
+                }
+            )
+
+            return TaskResult(
+                exit_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_seconds=duration,
+            )
 
     async def destroy(self, instance_id: str) -> None:
         """Destroy the sandbox container. Idempotent — never raises.
@@ -314,13 +401,10 @@ class PodmanRuntime(Runtime):
         """
         cmd = ["podman", "rm", "-f", instance_id]
         try:
-            # Swallow all errors — container may already be removed (--rm flag)
-            # or podman may not be installed in the test/CI environment.
             await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
         except Exception:  # noqa: BLE001 — intentionally broad; destroy must never raise
             pass
 
-        # Remove from internal state — pop with None default so unknown IDs don't raise.
         self._instances.pop(instance_id, None)
 
         self._audit.record({"event": "destroy", "instance_id": instance_id})
@@ -328,12 +412,16 @@ class PodmanRuntime(Runtime):
     def _build_network_flags(self, state: _InstanceState) -> list[str]:
         """Return the Podman network flags for the given instance state.
 
-        If network_allow is empty: complete isolation (--network=none).
-        Otherwise: slirp4netns with DNS blocked and pre-resolved add-host entries.
+        Ports require the slirp4netns network stack even when network_allow is
+        empty, because --network=none disables the loopback interface used by
+        port publishing (Decision #53).
 
-        This is a private method exposed for independent unit testing.
+        Rules:
+        - No network_allow AND no ports → --network=none (full isolation)
+        - network_allow OR ports         → slirp4netns + --dns=none
         """
-        if not state.config.network_allow:
+        needs_network = bool(state.config.network_allow) or bool(state.config.ports)
+        if not needs_network:
             return ["--network=none"]
 
         flags: list[str] = ["--network=slirp4netns", "--dns=none"]
