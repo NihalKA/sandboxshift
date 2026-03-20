@@ -70,10 +70,24 @@ build_and_push() {
   local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
 
   info "Building ${local_tag} (linux/amd64)..."
-  podman build --platform linux/amd64 -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
+  # --pull=always  — force-pull the AMD64 base image from the registry, never
+  #                  reuse cached layers that may have been built for ARM64.
+  # --platform     — cross-compile to AMD64 (required on Apple Silicon).
+  podman build \
+    --platform linux/amd64 \
+    --pull=always \
+    -t "${local_tag}" \
+    "${SCRIPT_DIR}/${image_dir}"
+
   podman tag "${local_tag}" "${ecr_tag}"
-  info "Pushing ${ecr_tag}..."
-  podman push "${ecr_tag}"
+
+  info "Pushing ${ecr_tag} (retries enabled)..."
+  # --retry 3 / --retry-delay 10s — handle transient ECR network blips (broken pipe).
+  podman push \
+    --retry 3 \
+    --retry-delay 10s \
+    "${ecr_tag}"
+
   ok "Pushed ${ecr_tag}"
 }
 
