@@ -48,6 +48,22 @@ _MARKER_IMAGES: dict[str, str] = {
     "go.mod":           "sandboxshift/runtime-go:1.22",
 }
 
+# ANSI colours — used for verbose step output
+_C_BLUE   = "\033[0;34m"
+_C_GREEN  = "\033[0;32m"
+_C_YELLOW = "\033[1;33m"
+_C_RESET  = "\033[0m"
+
+
+def _step(msg: str) -> None:
+    """Print a verbose progress line with a blue [sandboxshift] prefix."""
+    print(f"{_C_BLUE}[sandboxshift]{_C_RESET} {msg}", flush=True)
+
+
+def _ok(msg: str) -> None:
+    """Print a green completion line."""
+    print(f"{_C_GREEN}[sandboxshift]{_C_RESET} ✓ {msg}", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -190,21 +206,25 @@ class FargateRuntime(Runtime):
         instance_id = f"ss-{uuid.uuid4().hex[:12]}"
         bucket_name = f"sandboxshift-{instance_id}"
 
+        _step(f"Creating S3 staging bucket: {bucket_name} ...")
         try:
             await asyncio.to_thread(self._create_bucket, bucket_name)
         except Exception as e:
             raise RuntimeError(f"S3 bucket creation failed: {e}") from e
+        _ok("S3 bucket ready")
 
         files = [
             f
             for f in workspace.rglob("*")
             if f.is_file() and not _sensitive_filename(f.name)
         ]
+        _step(f"Uploading {len(files)} workspace file(s) to S3 ...")
         for f in files:
             try:
                 await asyncio.to_thread(self._upload_file, bucket_name, workspace, f)
             except Exception as e:
                 raise RuntimeError(f"S3 upload failed for {f}: {e}") from e
+        _ok("Workspace uploaded")
 
         image = _detect_image(workspace)  # audit-only
 
@@ -254,6 +274,7 @@ class FargateRuntime(Runtime):
 
         start_time = time.monotonic()
 
+        _step("Submitting ECS Fargate task ...")
         try:
             ecs_task_arn = await asyncio.to_thread(
                 self._run_ecs_task, instance_id, task, state
@@ -261,12 +282,17 @@ class FargateRuntime(Runtime):
         except Exception as e:
             raise RuntimeError(f"ECS run_task failed: {e}") from e
 
+        task_short_id = ecs_task_arn.split("/")[-1]
+        _ok(f"Task submitted: {task_short_id}")
+
         state.ecs_task_arn = ecs_task_arn
 
         await self._poll_until_stopped(instance_id, ecs_task_arn, state)
 
+        _step("Fetching CloudWatch logs ...")
         exit_code = await asyncio.to_thread(self._get_exit_code, ecs_task_arn, state)
         stdout, stderr = await asyncio.to_thread(self._get_logs, instance_id, state)
+        _ok("Logs retrieved")
 
         duration = time.monotonic() - start_time
 
@@ -297,6 +323,7 @@ class FargateRuntime(Runtime):
         Args:
             instance_id: The ID returned by provision(). Unknown IDs are a no-op.
         """
+        _step("Cleaning up AWS resources ...")
         try:
             state = self._instances.get(instance_id)
             if state and state.ecs_task_arn:
@@ -309,6 +336,7 @@ class FargateRuntime(Runtime):
         finally:
             # Security Layer 7: audit event must always fire, even if cleanup fails.
             self._audit.record({"event": "destroy", "instance_id": instance_id})
+        _ok("Sandbox destroyed")
 
     # -----------------------------------------------------------------------
     # Sync helpers (called via asyncio.to_thread)
@@ -393,27 +421,49 @@ class FargateRuntime(Runtime):
         task_arn: str,
         state: _FargateInstanceState,
     ) -> None:
-        """Poll ECS until the task reaches STOPPED status or timeout."""
+        """Poll ECS every 5s, printing a clean status line until STOPPED."""
         deadline = time.monotonic() + state.config.timeout_seconds
         ecs = self._session.client("ecs", region_name=self._region)
         start = time.monotonic()
-        print("[sandboxshift] Fargate task started — waiting for completion...", flush=True)
+        last_status = ""
+
         while True:
             if time.monotonic() >= deadline:
+                print()  # end the \r line before raising
                 raise TimeoutError(
                     f"Fargate task timed out after {state.config.timeout_seconds}s:"
                     f" {task_arn}"
                 )
+
             response = await asyncio.to_thread(
                 ecs.describe_tasks, cluster=state.cluster_arn, tasks=[task_arn]
             )
             task_desc = response["tasks"][0]
             status = task_desc["lastStatus"]
             elapsed = int(time.monotonic() - start)
-            print(f"\r[sandboxshift] {status} ({elapsed}s)...", end="", flush=True)
+
+            # Print a new timestamped line when status changes; otherwise overwrite
+            if status != last_status:
+                if last_status:
+                    print()  # finish previous \r line
+                print(
+                    f"{_C_BLUE}[sandboxshift]{_C_RESET}"
+                    f" {_C_YELLOW}{status}{_C_RESET} ...",
+                    flush=True,
+                )
+                last_status = status
+            else:
+                print(
+                    f"\r{_C_BLUE}[sandboxshift]{_C_RESET}"
+                    f" {_C_YELLOW}{status}{_C_RESET} ({elapsed}s)...",
+                    end="",
+                    flush=True,
+                )
+
             if status == "STOPPED":
-                print()  # newline after the final \r line
+                print()  # final newline
                 return
+
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
     def _get_exit_code(self, task_arn: str, state: _FargateInstanceState) -> int:
