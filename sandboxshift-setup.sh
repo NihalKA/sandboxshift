@@ -2,25 +2,29 @@
 # sandboxshift-setup.sh — One-command AWS infrastructure bootstrap for SandboxShift.
 #
 # What this script does:
-#   1. Detects your AWS account ID and default region automatically
-#   2. Creates an S3 bucket for Terraform remote state (with versioning + encryption)
-#   3. Creates a DynamoDB table for Terraform state locking
-#   4. Patches terraform/fargate/backend.tf with the real bucket name
-#   5. Runs terraform init + terraform apply (region is the only required var)
-#   6. Prints the FARGATE_* env vars ready to paste into your shell profile
+#   1.  Detects your AWS account ID and region automatically
+#   2.  Creates an S3 bucket for Terraform remote state
+#   3.  Creates a DynamoDB table for Terraform state locking
+#   4.  Creates ECR repositories for all three runtime images
+#   5.  Builds and pushes runtime images to ECR (python, node, multi)
+#   6.  Patches terraform/fargate/backend.tf
+#   7.  Runs terraform init + terraform apply (wires ECR image into task definition)
+#   8.  Writes all FARGATE_* env vars to ~/.sandboxshift/fargate.env
+#       (auto-loaded by the CLI — no manual source needed)
 #
 # Usage:
 #   chmod +x sandboxshift-setup.sh
 #   ./sandboxshift-setup.sh
 #
-# Optional env var overrides (all have sensible defaults):
+# Optional env var overrides:
 #   AWS_REGION           Override region (default: auto-detected from AWS config)
 #   SANDBOXSHIFT_ENV     Deployment tag (default: dev)
 #
 # Requirements:
 #   - aws CLI configured (aws configure or AWS_PROFILE)
-#   - terraform >= 1.5 installed
-#   - jq installed (brew install jq)
+#   - terraform >= 1.5
+#   - docker (Docker Desktop or equivalent)
+#   - jq (brew install jq)
 
 set -euo pipefail
 
@@ -32,7 +36,7 @@ BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Colour
+NC='\033[0m'
 
 info()  { echo -e "${BLUE}[sandboxshift]${NC} $*"; }
 ok()    { echo -e "${GREEN}[sandboxshift]${NC} ✓ $*"; }
@@ -41,6 +45,36 @@ error() { echo -e "${RED}[sandboxshift]${NC} ✗ $*" >&2; exit 1; }
 
 check_dependency() {
   command -v "$1" &>/dev/null || error "'$1' is required but not installed. $2"
+}
+
+ensure_ecr_repo() {
+  local repo_name="$1"
+  if aws ecr describe-repositories \
+      --repository-names "${repo_name}" \
+      --region "${REGION}" &>/dev/null; then
+    ok "ECR repo already exists: ${repo_name}"
+  else
+    info "Creating ECR repo: ${repo_name}"
+    aws ecr create-repository \
+      --repository-name "${repo_name}" \
+      --region "${REGION}" \
+      --image-scanning-configuration scanOnPush=true \
+      --output text > /dev/null
+    ok "Created ECR repo: ${repo_name}"
+  fi
+}
+
+build_and_push() {
+  local image_dir="$1"   # e.g. images/python
+  local local_tag="$2"   # e.g. sandboxshift/runtime-python:3.11
+  local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
+
+  info "Building ${local_tag}..."
+  docker build -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
+  docker tag "${local_tag}" "${ecr_tag}"
+  info "Pushing ${ecr_tag}..."
+  docker push "${ecr_tag}"
+  ok "Pushed ${ecr_tag}"
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -53,11 +87,11 @@ echo -e "${BLUE}  SandboxShift — AWS Infrastructure Setup${NC}"
 echo -e "${BLUE}██████████████████████████████████████████████${NC}"
 echo ""
 
-check_dependency aws  "Install with: brew install awscli"
+check_dependency aws       "Install with: brew install awscli"
 check_dependency terraform "Install with: brew install terraform"
-check_dependency jq   "Install with: brew install jq"
+check_dependency docker    "Install Docker Desktop: https://www.docker.com/products/docker-desktop"
+check_dependency jq        "Install with: brew install jq"
 
-# Must be run from the repo root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="${SCRIPT_DIR}/terraform/fargate"
 [[ -f "${TF_DIR}/main.tf" ]] || error "Run this script from the sandboxshift repo root."
@@ -73,7 +107,6 @@ IDENTITY=$(aws sts get-caller-identity 2>/dev/null) \
 ACCOUNT_ID=$(echo "${IDENTITY}" | jq -r '.Account')
 CALLER_ARN=$(echo "${IDENTITY}" | jq -r '.Arn')
 
-# Region: env var > AWS_DEFAULT_REGION > aws config > prompt
 if [[ -n "${AWS_REGION:-}" ]]; then
   REGION="${AWS_REGION}"
 elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
@@ -89,19 +122,19 @@ fi
 
 ENV_TAG="${SANDBOXSHIFT_ENV:-dev}"
 
-ok "Account: ${ACCOUNT_ID}"
-ok "Region:  ${REGION}"
-ok "Caller:  ${CALLER_ARN}"
+# ECR registry hostname is always deterministic — no API call needed.
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+
+ok "Account:      ${ACCOUNT_ID}"
+ok "Region:       ${REGION}"
+ok "ECR registry: ${ECR_REGISTRY}"
+ok "Caller:       ${CALLER_ARN}"
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Generate unique names for the Terraform state bucket and DynamoDB lock table.
-# The workspace S3 bucket name is auto-generated by Terraform itself
-# (random_id + account ID in main.tf locals) — no user input required.
+# Persistent setup state
 # ───────────────────────────────────────────────────────────────────────────────
 
-# Persistent hash: stored in ~/.sandboxshift/setup.env so re-running
-# the script uses the same state bucket names (idempotent).
 SETUP_ENV="${HOME}/.sandboxshift/setup.env"
 mkdir -p "${HOME}/.sandboxshift"
 
@@ -110,8 +143,6 @@ if [[ -f "${SETUP_ENV}" ]]; then
   source "${SETUP_ENV}"
   info "Reusing existing setup: ${SETUP_ENV}"
 else
-  # openssl rand -hex 3 → 3 random bytes = 6-char hex string.
-  # Avoids the tr|head SIGPIPE that kills the script under set -o pipefail.
   RAND_HASH=$(openssl rand -hex 3)
   STATE_BUCKET="sandboxshift-tfstate-${ACCOUNT_ID}-${RAND_HASH}"
   LOCK_TABLE="sandboxshift-tfstate-lock-${RAND_HASH}"
@@ -130,11 +161,11 @@ fi
 
 info "State bucket: ${STATE_BUCKET}"
 info "Lock table:   ${LOCK_TABLE}"
-info "Workspace bucket: auto-generated by Terraform (sandboxshift-ws-{account}-{hash})"
+info "Workspace bucket: auto-generated by Terraform"
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 1: S3 state bucket
+# Step 1: S3 Terraform state bucket
 # ───────────────────────────────────────────────────────────────────────────────
 
 if aws s3api head-bucket --bucket "${STATE_BUCKET}" --region "${REGION}" 2>/dev/null; then
@@ -153,21 +184,17 @@ else
       --create-bucket-configuration LocationConstraint="${REGION}" \
       --output text > /dev/null
   fi
-
   aws s3api put-bucket-versioning \
     --bucket "${STATE_BUCKET}" \
     --versioning-configuration Status=Enabled
-
   aws s3api put-bucket-encryption \
     --bucket "${STATE_BUCKET}" \
     --server-side-encryption-configuration \
       '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-
   aws s3api put-public-access-block \
     --bucket "${STATE_BUCKET}" \
     --public-access-block-configuration \
       BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-
   ok "State bucket created and secured."
 fi
 
@@ -192,7 +219,6 @@ else
     --billing-mode PAY_PER_REQUEST \
     --region "${REGION}" \
     --output text > /dev/null
-
   info "Waiting for table to become active..."
   aws dynamodb wait table-exists \
     --table-name "${LOCK_TABLE}" \
@@ -201,7 +227,51 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 3: Patch backend.tf with real bucket and table names
+# Step 3: ECR repositories
+# ───────────────────────────────────────────────────────────────────────────────
+
+info "Setting up ECR repositories..."
+ensure_ecr_repo "sandboxshift/runtime-python"
+ensure_ecr_repo "sandboxshift/runtime-node"
+ensure_ecr_repo "sandboxshift/runtime-multi"
+echo ""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Step 4: Docker login to ECR
+# ───────────────────────────────────────────────────────────────────────────────
+
+info "Logging in to ECR..."
+aws ecr get-login-password --region "${REGION}" \
+  | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+ok "Docker logged in to ECR."
+echo ""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Step 5: Build and push runtime images
+# ───────────────────────────────────────────────────────────────────────────────
+
+info "Building and pushing runtime images (this may take a few minutes)..."
+echo ""
+
+build_and_push \
+  "images/python" \
+  "sandboxshift/runtime-python:3.11" \
+  "${ECR_REGISTRY}/sandboxshift/runtime-python:3.11"
+
+build_and_push \
+  "images/node" \
+  "sandboxshift/runtime-node:20" \
+  "${ECR_REGISTRY}/sandboxshift/runtime-node:20"
+
+build_and_push \
+  "images/multi" \
+  "sandboxshift/runtime-multi:latest" \
+  "${ECR_REGISTRY}/sandboxshift/runtime-multi:latest"
+
+echo ""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Step 6: Patch backend.tf
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Patching terraform/fargate/backend.tf..."
@@ -221,7 +291,7 @@ EOF
 ok "backend.tf patched."
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 4: terraform init
+# Step 7: terraform init + apply
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Running terraform init..."
@@ -235,41 +305,35 @@ terraform init -reconfigure \
 ok "terraform init complete."
 echo ""
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 5: terraform apply — only aws_region is required; everything else is
-# either defaulted or auto-computed (workspace bucket name, etc.)
-# ───────────────────────────────────────────────────────────────────────────────
-
 info "Running terraform apply..."
 terraform apply -auto-approve \
   -var="aws_region=${REGION}" \
+  -var="ecr_registry=${ECR_REGISTRY}" \
   -var="environment=${ENV_TAG}"
 ok "terraform apply complete."
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 6: Read outputs and write env vars
+# Step 8: Read outputs and write fargate.env
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Reading terraform outputs..."
 TF_OUTPUTS=$(terraform output -json)
 
-CLUSTER_ARN=$(echo "${TF_OUTPUTS}"        | jq -r '.cluster_arn.value')
-TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"       | jq -r '.task_def_arn.value')
-LOG_GROUP=$(echo "${TF_OUTPUTS}"          | jq -r '.log_group.value')
-SUBNET_IDS_JSON=$(echo "${TF_OUTPUTS}"    | jq -r '.subnet_ids.value | join(",")')
-SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"      | jq -r '.security_group_ids.value | join(",")')
-WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}"   | jq -r '.workspace_bucket_name.value')
+CLUSTER_ARN=$(echo "${TF_OUTPUTS}"      | jq -r '.cluster_arn.value')
+TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"     | jq -r '.task_def_arn.value')
+LOG_GROUP=$(echo "${TF_OUTPUTS}"        | jq -r '.log_group.value')
+SUBNET_IDS_CSV=$(echo "${TF_OUTPUTS}"   | jq -r '.subnet_ids.value | join(",")')
+SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"    | jq -r '.security_group_ids.value | join(",")')
+WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}" | jq -r '.workspace_bucket_name.value')
 
-# Write env vars to ~/.sandboxshift/fargate.env for easy sourcing
 FARGATE_ENV="${HOME}/.sandboxshift/fargate.env"
 cat > "${FARGATE_ENV}" <<EOF
 # SandboxShift Fargate env vars — auto-generated by sandboxshift-setup.sh
-# Source this file or add these exports to your ~/.zshrc / ~/.bashrc:
-#   source ~/.sandboxshift/fargate.env
+# Auto-loaded by the CLI — no manual source needed.
 export FARGATE_CLUSTER_ARN="${CLUSTER_ARN}"
 export FARGATE_TASK_DEFINITION_ARN="${TASK_DEF_ARN}"
-export FARGATE_SUBNET_IDS="${SUBNET_IDS_JSON}"
+export FARGATE_SUBNET_IDS="${SUBNET_IDS_CSV}"
 export FARGATE_SECURITY_GROUP_IDS="${SEC_GROUP_IDS}"
 export FARGATE_LOG_GROUP="${LOG_GROUP}"
 export FARGATE_REGION="${REGION}"
@@ -279,11 +343,8 @@ EOF
 ok "Env vars saved to ${FARGATE_ENV}"
 echo ""
 
-echo -e "  Workspace bucket: ${YELLOW}${WORKSPACE_BUCKET}${NC}"
-echo ""
-
 # ───────────────────────────────────────────────────────────────────────────────
-# Done — print summary
+# Done
 # ───────────────────────────────────────────────────────────────────────────────
 
 echo -e "${GREEN}"
@@ -291,15 +352,11 @@ echo "  ████████████████████████
 echo "  SandboxShift AWS setup complete!"
 echo "  ██████████████████████████████████████████████"
 echo -e "${NC}"
-echo "  To activate in your current shell:"
+echo "  ECR registry:     ${ECR_REGISTRY}"
+echo "  Workspace bucket: ${WORKSPACE_BUCKET}"
 echo ""
-echo -e "    ${YELLOW}source ~/.sandboxshift/fargate.env${NC}"
-echo ""
-echo "  To activate permanently, add to ~/.zshrc or ~/.bashrc:"
-echo ""
-echo -e "    ${YELLOW}echo 'source ~/.sandboxshift/fargate.env' >> ~/.zshrc${NC}"
-echo ""
-echo "  Then run:"
+echo "  The CLI auto-loads Fargate credentials — no export needed."
+echo "  Just run:"
 echo ""
 echo -e "    ${YELLOW}sandboxshift run /tmp/my-project \"echo hello from fargate\" --ram-threshold 999${NC}"
 echo ""
