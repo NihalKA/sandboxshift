@@ -23,6 +23,12 @@ ENTRYPOINT baked into the base image (e.g. Chainguard python sets
 ENTRYPOINT ["python"]). Without this, podman run ... image /bin/sh -c task
 would be interpreted as python /bin/sh -c task, causing Python to try to
 execute /bin/sh as a script and crash with a SyntaxError on the ELF header.
+
+Unrestricted network mode (Decision #54): when network_allow contains "*",
+the container uses slirp4netns without --dns=none and without any
+--add-host entries, giving full outbound internet access. This intentionally
+disables Security Layer 4 and is recorded as a network_unrestricted_mode
+audit event with an explicit warning.
 """
 
 from __future__ import annotations
@@ -89,6 +95,7 @@ class _InstanceState:
     workspace: Path
     config: SandboxConfig
     resolved_hosts: dict[str, str] = field(default_factory=dict)  # domain → IPv4
+    unrestricted_network: bool = False  # True when network_allow contains "*" (Decision #54)
 
 
 def _detect_image(workspace: Path) -> str:
@@ -175,10 +182,12 @@ class PodmanRuntime(Runtime):
           1. Validate workspace exists.
           2. Auto-detect sandboxshift runtime image from workspace markers.
           3. Generate a unique instance_id.
-          4. Resolve DNS for each domain in config.network_allow.
+          4a. If network_allow contains "*": set unrestricted_network=True,
+              emit network_unrestricted_mode audit warning, skip DNS resolution.
+          4b. Otherwise: resolve DNS for each domain in config.network_allow.
           5. Pre-check each host port in config.ports for availability.
           6. Store _InstanceState keyed by instance_id.
-          7. Record audit event.
+          7. Record provision audit event.
           8. Return instance_id.
 
         Args:
@@ -200,21 +209,38 @@ class PodmanRuntime(Runtime):
         image = _detect_image(workspace)
         instance_id = f"ss-{uuid.uuid4().hex[:12]}"
 
-        # Resolve DNS for allowed domains ahead of container start.
-        # Fail-safe: unresolvable domains are skipped with an audit warning.
         resolved_hosts: dict[str, str] = {}
-        for domain in config.network_allow:
-            ip = await asyncio.to_thread(_resolve_host, domain)
-            if ip is not None:
-                resolved_hosts[domain] = ip
-            else:
-                self._audit.record(
-                    {
-                        "event": "dns_resolution_failed",
-                        "instance_id": instance_id,
-                        "domain": domain,
-                    }
-                )
+        unrestricted_network = "*" in config.network_allow
+
+        if unrestricted_network:
+            # Unrestricted mode (Decision #54): skip per-domain DNS resolution
+            # and --add-host injection. Container gets full internet via slirp4netns.
+            # This disables Security Layer 4 — audit with explicit warning.
+            self._audit.record(
+                {
+                    "event": "network_unrestricted_mode",
+                    "instance_id": instance_id,
+                    "warning": (
+                        "network_allow contains '*' — all outbound traffic is permitted. "
+                        "Security Layer 4 (network policy) is DISABLED for this run."
+                    ),
+                }
+            )
+        else:
+            # Resolve DNS for allowed domains ahead of container start.
+            # Fail-safe: unresolvable domains are skipped with an audit warning.
+            for domain in config.network_allow:
+                ip = await asyncio.to_thread(_resolve_host, domain)
+                if ip is not None:
+                    resolved_hosts[domain] = ip
+                else:
+                    self._audit.record(
+                        {
+                            "event": "dns_resolution_failed",
+                            "instance_id": instance_id,
+                            "domain": domain,
+                        }
+                    )
 
         # Pre-check port availability (Decision #52).
         # Fail fast with a clear error before starting the container.
@@ -227,6 +253,7 @@ class PodmanRuntime(Runtime):
             workspace=workspace,
             config=config,
             resolved_hosts=resolved_hosts,
+            unrestricted_network=unrestricted_network,
         )
 
         self._audit.record(
@@ -429,14 +456,17 @@ class PodmanRuntime(Runtime):
     def _build_network_flags(self, state: _InstanceState) -> list[str]:
         """Return the Podman network flags for the given instance state.
 
-        Ports require the slirp4netns network stack even when network_allow is
-        empty, because --network=none disables the loopback interface used by
-        port publishing (Decision #53).
-
-        Rules:
+        Three cases:
+        - unrestricted_network=True ("*") → slirp4netns only; no --dns=none,
+          no --add-host. Full internet access. Security Layer 4 disabled.
         - No network_allow AND no ports → --network=none (full isolation)
-        - network_allow OR ports         → slirp4netns + --dns=none
+        - network_allow (specific domains) OR ports → slirp4netns + --dns=none
+          + --add-host per resolved domain
         """
+        # Unrestricted mode (Decision #54) — full internet, no per-host filter.
+        if state.unrestricted_network:
+            return ["--network=slirp4netns"]
+
         needs_network = bool(state.config.network_allow) or bool(state.config.ports)
         if not needs_network:
             return ["--network=none"]

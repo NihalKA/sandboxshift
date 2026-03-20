@@ -50,7 +50,7 @@ def tmp_workspace(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
-    """Alias for tmp_path — used in Group 8 tests."""
+    """Alias for tmp_path — used in Group 8/9 tests."""
     return tmp_path
 
 
@@ -740,3 +740,70 @@ async def test_subprocess_run_used_when_no_ports(
     rt, iid = await _provisioned_runtime(workspace, default_config, mock_subprocess)
     await rt.execute(iid, "echo hi", default_config)
     mock_subprocess.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — Unrestricted network mode ("*") — Decision #54
+# ---------------------------------------------------------------------------
+
+
+async def test_unrestricted_network_uses_slirp4netns(
+    workspace: Path,
+    mock_subprocess,
+) -> None:
+    """network_allow=['*'] must select slirp4netns (not --network=none)."""
+    config = SandboxConfig(network_allow=["*"])
+    rt, iid = await _provisioned_runtime(workspace, config, mock_subprocess)
+    await rt.execute(iid, "echo hi", config)
+    cmd = mock_subprocess.call_args[0][0]
+    assert "--network=slirp4netns" in cmd
+    assert "--network=none" not in cmd
+
+
+async def test_unrestricted_network_no_dns_block(
+    workspace: Path,
+    mock_subprocess,
+) -> None:
+    """network_allow=['*'] must NOT add --dns=none (full DNS allowed)."""
+    config = SandboxConfig(network_allow=["*"])
+    rt, iid = await _provisioned_runtime(workspace, config, mock_subprocess)
+    await rt.execute(iid, "echo hi", config)
+    cmd = mock_subprocess.call_args[0][0]
+    assert "--dns=none" not in cmd
+
+
+async def test_unrestricted_network_no_add_host(
+    workspace: Path,
+    mock_subprocess,
+) -> None:
+    """network_allow=['*'] must NOT inject any --add-host entries."""
+    config = SandboxConfig(network_allow=["*"])
+    rt, iid = await _provisioned_runtime(workspace, config, mock_subprocess)
+    await rt.execute(iid, "echo hi", config)
+    cmd = mock_subprocess.call_args[0][0]
+    assert not any(f.startswith("--add-host") for f in cmd)
+
+
+async def test_unrestricted_network_emits_audit_warning(
+    workspace: Path,
+    mock_subprocess,
+) -> None:
+    """network_allow=['*'] must emit a network_unrestricted_mode audit event."""
+    mock_audit = MagicMock(spec=AuditLogger)
+    config = SandboxConfig(network_allow=["*"])
+    rt = PodmanRuntime(audit_logger=mock_audit)
+    await rt.provision(workspace, config)
+    events = [c.args[0]["event"] for c in mock_audit.record.call_args_list]
+    assert "network_unrestricted_mode" in events
+
+
+async def test_unrestricted_network_does_not_call_resolve_host(
+    workspace: Path,
+    mock_subprocess,
+) -> None:
+    """network_allow=['*'] must not call _resolve_host (no DNS resolution needed)."""
+    config = SandboxConfig(network_allow=["*"])
+    with patch("src.sandbox.runtime.podman._resolve_host") as mock_resolve:
+        rt = PodmanRuntime()
+        await rt.provision(workspace, config)
+    mock_resolve.assert_not_called()

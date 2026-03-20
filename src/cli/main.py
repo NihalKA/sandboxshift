@@ -86,11 +86,14 @@ def _validate_workspace(workspace_str: str) -> Path:
 def _validate_allow_hosts(hosts: list[str]) -> None:
     """Reject bare IP addresses and non-FQDN values in --allow.
 
-    Mirrors the validation in src/api/models.py to protect CLI users who
-    bypass the API layer. Prevents SSRF against AWS IMDS (169.254.169.254)
-    and internal services reachable from the sandbox network.
+    "*" is accepted as a special sentinel for unrestricted network mode
+    (Decision #54). All other entries must be FQDNs — bare IPs including
+    IMDS 169.254.169.254 are rejected.
     """
     for host in hosts:
+        # "*" is the unrestricted-network sentinel — bypass all checks.
+        if host == "*":
+            continue
         # Reject bare IP addresses outright (IPv4 and IPv6).
         try:
             ipaddress.ip_address(host)
@@ -233,7 +236,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    # Validate --allow FQDN-only (rejects bare IPs including IMDS 169.254.169.254).
+    # Validate --allow: FQDNs only, except "*" which enables unrestricted mode.
     if args.allow:
         _validate_allow_hosts(args.allow)
 
@@ -308,7 +311,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
     run_p.add_argument("--memory-mb", type=int, default=4096, dest="memory_mb")
     run_p.add_argument("--cpu", type=float, default=2.0)
-    run_p.add_argument("--allow", nargs="*", metavar="FQDN", default=None)
+    run_p.add_argument(
+        "--allow",
+        nargs="*",
+        metavar="FQDN",
+        default=None,
+        help=(
+            "FQDNs the sandbox may connect to. Use '*' for unrestricted internet access "
+            "(disables Security Layer 4). Repeatable."
+        ),
+    )
     run_p.add_argument("--audit-log", default=None, dest="audit_log")
     run_p.add_argument("--ram-threshold", type=float, default=4.0, dest="ram_threshold")
     run_p.add_argument(

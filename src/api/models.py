@@ -89,8 +89,9 @@ class RunRequest(BaseModel):
     allowed_hosts: list[str] | None = Field(
         default=None,
         description=(
-            "FQDNs the sandbox may reach outbound. Bare IP addresses are rejected. "
-            "Private/link-local ranges are also blocked."
+            "FQDNs the sandbox may reach outbound. Use ['*'] for unrestricted "
+            "internet access (disables Security Layer 4). Bare IP addresses "
+            "are rejected. Private/link-local ranges are also blocked."
         ),
     )
     setup_command: str | None = Field(
@@ -135,21 +136,23 @@ class RunRequest(BaseModel):
     @field_validator("allowed_hosts", mode="before")
     @classmethod
     def validate_allowed_hosts(cls, v: object) -> object:
-        """Reject bare IP addresses and private/link-local ranges.
+        """Validate allowed_hosts entries.
 
-        Only fully-qualified domain names (FQDNs) are permitted.
-        This prevents SSRF attacks against IMDS (169.254.169.254) and internal
-        services visible from the sandbox network.
+        Special value "*" is accepted as-is and enables unrestricted network
+        mode (Decision #54). All other entries must be FQDNs — bare IP
+        addresses and private/link-local ranges are rejected.
 
         Raises:
-            ValueError: If any entry is a bare IP, an invalid FQDN, or a
-                        private/link-local address range.
+            ValueError: If any non-wildcard entry is a bare IP or invalid FQDN.
         """
         if v is None:
             return v
         entries: list[str] = list(v)  # type: ignore[arg-type]
         for entry in entries:
             entry = entry.strip()
+            # "*" is the unrestricted-network sentinel — bypass all checks.
+            if entry == "*":
+                continue
             if _is_blocked_ip(entry):
                 raise ValueError(
                     f"allowed_hosts must contain FQDNs only — bare IP addresses "
