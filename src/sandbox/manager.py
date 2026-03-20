@@ -15,6 +15,7 @@ pattern as Decision #12 (BurstEngine enforces FORCE_LOCAL, not SandboxManager).
 Audit events emitted:
   "run_start"                 — before scan; always emitted
   "sensitivity_check_skipped" — when config.skip_sensitivity_check is True
+  "sensitivity_blocked"       — when findings caused the run to be blocked
   "cloud_runtime_unavailable" — when decision==cloud but cloud_runtime is None
   "run_complete"              — after successful execute + destroy
 """
@@ -33,6 +34,28 @@ from .runtime.base import Runtime, TaskResult
 
 
 # ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class SensitivityBlockedError(Exception):
+    """Raised by SandboxManager.run() when the workspace contains sensitive data
+    and the caller has not set config.skip_sensitivity_check = True.
+
+    Attributes:
+        findings: Human-readable list of sensitivity findings from
+                  SensitivityResult.explain().
+    """
+
+    def __init__(self, findings: list[str]) -> None:
+        self.findings = findings
+        super().__init__(
+            f"Workspace contains sensitive data ({len(findings)} finding(s)). "
+            "Pass skip_sensitivity_check=True to override."
+        )
+
+
+# ---------------------------------------------------------------------------
 # RunResult
 # ---------------------------------------------------------------------------
 
@@ -44,8 +67,9 @@ class RunResult:
     Attributes:
         task_result:          Exit code, stdout, stderr, and execute() duration.
         runtime_mode:         Actual mode used — "local" or "cloud".
-        sensitivity_reasons:  Human-readable findings from SensitivityScanner.explain().
-                              Empty list when workspace is clean or scan was skipped.
+        sensitivity_reasons:  Human-readable findings from SensitivityResult.explain().
+                              Always empty in V1 (findings block execution;
+                              skip_sensitivity_check bypasses the scan entirely).
         burst_confidence:     "forced" or "preferred" from BurstDecision.
         duration_seconds:     Total wall-clock time for the entire run() call,
                               including provision, execute, and destroy.
@@ -112,6 +136,8 @@ class SandboxManager:
           2a. If config.skip_sensitivity_check is True: emit audit warning,
               produce an empty SensitivityResult (ALLOW_CLOUD).
           2b. Otherwise: SensitivityScanner.scan(workspace) → SensitivityResult.
+              If findings exist → emit "sensitivity_blocked" audit event and
+              raise SensitivityBlockedError(findings). No execution occurs.
           3. BurstEngine.decide(scan_result, workspace, config) → BurstDecision.
           4. If decision.mode == "cloud" but cloud_runtime is None: emit
              "cloud_runtime_unavailable" audit event; override mode to "local".
@@ -135,6 +161,8 @@ class SandboxManager:
             RunResult on success.
 
         Raises:
+            SensitivityBlockedError: If the workspace contains sensitive data
+                and config.skip_sensitivity_check is False.
             Any exception raised by scanner.scan(), burst_engine.decide(),
             runtime.provision(), or runtime.execute() propagates to the caller.
         """
@@ -166,6 +194,16 @@ class SandboxManager:
             )
         else:
             scan_result = await self._scanner.scan(workspace)
+            if scan_result.is_sensitive:
+                findings = scan_result.explain()
+                self._audit.record(
+                    {
+                        "event": "sensitivity_blocked",
+                        "workspace": str(workspace),
+                        "findings_count": len(findings),
+                    }
+                )
+                raise SensitivityBlockedError(findings)
 
         # Step 3: Burst decision
         decision = await self._burst_engine.decide(scan_result, workspace, config)

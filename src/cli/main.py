@@ -16,7 +16,7 @@ from ..config_loader import load_workspace_config
 from ..observability.audit import AuditLogger
 from ..sandbox.burst.engine import BurstEngine
 from ..sandbox.detection.sensitivity import SensitivityScanner
-from ..sandbox.manager import RunResult, SandboxManager
+from ..sandbox.manager import RunResult, SandboxManager, SensitivityBlockedError
 from ..sandbox.runtime.fargate import FargateRuntime
 from ..sandbox.runtime.podman import PodmanRuntime
 
@@ -237,7 +237,21 @@ def _cmd_run(args: argparse.Namespace) -> None:
     if args.allow:
         _validate_allow_hosts(args.allow)
 
-    result = asyncio.run(_run_async(args, workspace))
+    try:
+        result = asyncio.run(_run_async(args, workspace))
+    except SensitivityBlockedError as exc:
+        for reason in exc.findings:
+            print(f"[sensitive] {reason}", file=sys.stderr)
+        print(
+            "\nBlocked: workspace contains sensitive data.",
+            file=sys.stderr,
+        )
+        print(
+            "To run anyway: sandboxshift run ... --skip-sensitivity-check",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(f"Runtime: {result.runtime_mode}")
     print(f"Duration: {result.duration_seconds:.2f}s")
     print(f"Exit code: {result.task_result.exit_code}")

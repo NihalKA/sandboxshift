@@ -4,9 +4,10 @@ Test groups:
   Group 1: Constructor validation                    (2 tests)
   Group 2: run() — local path                        (5 tests)
   Group 3: run() — cloud path                        (4 tests)
-  Group 4: run() — FORCE_LOCAL override              (3 tests)
+  Group 4: run() — sensitivity blocked               (3 tests)
   Group 5: run() — cloud_runtime=None fallback       (3 tests)
   Group 6: run() — destroy always called             (3 tests)
+  Group 7: run() — skip_sensitivity_check            (3 tests)
 
 asyncio_mode = "auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
 """
@@ -28,7 +29,7 @@ from sandboxshift.sandbox.detection.sensitivity import (
     SensitivityResult,
     SensitivityScanner,
 )
-from sandboxshift.sandbox.manager import RunResult, SandboxManager
+from sandboxshift.sandbox.manager import RunResult, SandboxManager, SensitivityBlockedError
 from sandboxshift.sandbox.runtime.base import Runtime, TaskResult
 
 
@@ -217,62 +218,57 @@ class TestRunCloudPath:
 
 
 # ---------------------------------------------------------------------------
-# Group 4: run() — FORCE_LOCAL override
+# Group 4: run() — sensitivity blocked
 # ---------------------------------------------------------------------------
 
 
-class TestRunForceLocal:
-    async def test_force_local_uses_local_runtime(self, tmp_path: Path) -> None:
-        """When scan is sensitive + decision is forced local, local_runtime must run."""
-        local = _make_runtime("ss-local-forced")
+class TestSensitivityBlocked:
+    """When the workspace is sensitive and skip_sensitivity_check is False,
+    run() must raise SensitivityBlockedError before provisioning anything.
+    """
+
+    async def test_raises_sensitivity_blocked_error(self, tmp_path: Path) -> None:
+        """run() must raise SensitivityBlockedError when scan is sensitive."""
+        scanner = _make_scanner(
+            is_sensitive=True,
+            recommendation=Recommendation.FORCE_LOCAL,
+            findings=[_make_finding(tmp_path)],
+        )
+        manager = _make_manager(scanner=scanner)
+        with pytest.raises(SensitivityBlockedError):
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+
+    async def test_no_provision_when_blocked(self, tmp_path: Path) -> None:
+        """Neither local nor cloud provision() must be called when blocked."""
+        local = _make_runtime("ss-local-never")
         cloud = _make_runtime("ss-cloud-never")
         scanner = _make_scanner(
             is_sensitive=True,
             recommendation=Recommendation.FORCE_LOCAL,
             findings=[_make_finding(tmp_path)],
         )
-        engine = _make_burst_engine(mode="local", confidence="forced")
         manager = _make_manager(
             local_runtime=local,
             cloud_runtime=cloud,
-            burst_engine=engine,
             scanner=scanner,
         )
-        await manager.run(tmp_path, "echo hi", SandboxConfig())
-        local.provision.assert_awaited_once()
+        with pytest.raises(SensitivityBlockedError):
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+        local.provision.assert_not_awaited()
         cloud.provision.assert_not_awaited()
 
-    async def test_force_local_cloud_runtime_never_called(self, tmp_path: Path) -> None:
-        """cloud_runtime must be completely silent when mode is forced local."""
-        cloud = _make_runtime("ss-cloud-never")
+    async def test_findings_included_in_error(self, tmp_path: Path) -> None:
+        """SensitivityBlockedError.findings must contain the explain() output."""
+        finding = _make_finding(tmp_path)
         scanner = _make_scanner(
             is_sensitive=True,
             recommendation=Recommendation.FORCE_LOCAL,
-            findings=[_make_finding(tmp_path)],
+            findings=[finding],
         )
-        engine = _make_burst_engine(mode="local", confidence="forced")
-        manager = _make_manager(
-            cloud_runtime=cloud,
-            burst_engine=engine,
-            scanner=scanner,
-        )
-        await manager.run(tmp_path, "echo hi", SandboxConfig())
-        cloud.provision.assert_not_awaited()
-        cloud.execute.assert_not_awaited()
-        cloud.destroy.assert_not_awaited()
-
-    async def test_force_local_runtime_mode_in_result(self, tmp_path: Path) -> None:
-        """RunResult.runtime_mode must be 'local' for a forced-local decision."""
-        scanner = _make_scanner(
-            is_sensitive=True,
-            recommendation=Recommendation.FORCE_LOCAL,
-            findings=[_make_finding(tmp_path)],
-        )
-        engine = _make_burst_engine(mode="local", confidence="forced")
-        manager = _make_manager(burst_engine=engine, scanner=scanner)
-        result = await manager.run(tmp_path, "echo hi", SandboxConfig())
-        assert result.runtime_mode == "local"
-        assert result.burst_confidence == "forced"
+        manager = _make_manager(scanner=scanner)
+        with pytest.raises(SensitivityBlockedError) as exc_info:
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+        assert len(exc_info.value.findings) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +346,50 @@ class TestDestroyAlwaysCalled:
         with pytest.raises(RuntimeError, match="no disk space"):
             await manager.run(tmp_path, "echo hi", SandboxConfig())
         local.destroy.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Group 7: run() — skip_sensitivity_check
+# ---------------------------------------------------------------------------
+
+
+class TestSkipSensitivityCheck:
+    """When config.skip_sensitivity_check=True, sensitive workspaces run normally.
+    SensitivityBlockedError must NOT be raised.
+    """
+
+    async def test_skips_scan_and_runs_task(self, tmp_path: Path) -> None:
+        """Task must execute when skip=True even if scanner would return sensitive."""
+        local = _make_runtime("ss-skip-abc123")
+        # scanner would return sensitive — but scan() must not be called at all.
+        scanner = _make_scanner(
+            is_sensitive=True,
+            recommendation=Recommendation.FORCE_LOCAL,
+            findings=[_make_finding(tmp_path)],
+        )
+        manager = _make_manager(local_runtime=local, scanner=scanner)
+        config = SandboxConfig(skip_sensitivity_check=True)
+        result = await manager.run(tmp_path, "echo hi", config)
+        assert isinstance(result, RunResult)
+        local.provision.assert_awaited_once()
+
+    async def test_scanner_not_called_when_skip_true(self, tmp_path: Path) -> None:
+        """SensitivityScanner.scan() must not be called when skip=True."""
+        scanner = _make_scanner(
+            is_sensitive=True,
+            recommendation=Recommendation.FORCE_LOCAL,
+            findings=[_make_finding(tmp_path)],
+        )
+        manager = _make_manager(scanner=scanner)
+        config = SandboxConfig(skip_sensitivity_check=True)
+        await manager.run(tmp_path, "echo hi", config)
+        scanner.scan.assert_not_called()
+
+    async def test_skip_emits_audit_event(self, tmp_path: Path) -> None:
+        """sensitivity_check_skipped audit event must be recorded when skip=True."""
+        audit = MagicMock(spec=AuditLogger)
+        manager = _make_manager(audit_logger=audit)
+        config = SandboxConfig(skip_sensitivity_check=True)
+        await manager.run(tmp_path, "echo hi", config)
+        events = [c.args[0]["event"] for c in audit.record.call_args_list]
+        assert "sensitivity_check_skipped" in events

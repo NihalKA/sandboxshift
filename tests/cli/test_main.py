@@ -19,7 +19,7 @@ from sandboxshift.cli.main import (
     _validate_workspace,
     main,
 )
-from sandboxshift.sandbox.manager import RunResult
+from sandboxshift.sandbox.manager import RunResult, SensitivityBlockedError
 from sandboxshift.sandbox.runtime.base import TaskResult
 
 
@@ -501,3 +501,73 @@ def test_yaml_ports_loaded_when_no_cli_port(
         main()
     call_kwargs = instance.run.call_args.kwargs
     assert call_kwargs["config"].ports == [(8000, 8000)]
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — Sensitivity blocking + --skip-sensitivity-check
+# ---------------------------------------------------------------------------
+
+def test_sensitivity_blocked_exits_1(workspace, capsys):
+    """When manager.run() raises SensitivityBlockedError, CLI must exit with code 1."""
+    with patch("sandboxshift.cli.main.SandboxManager") as mock_cls, \
+         patch("sandboxshift.cli.main.PodmanRuntime"), \
+         patch("sandboxshift.cli.main.SensitivityScanner"), \
+         patch("sandboxshift.cli.main.load_workspace_config", return_value={}):
+        mock_cls.return_value.run = AsyncMock(
+            side_effect=SensitivityBlockedError(["[content_scan] Hardcoded password found"])
+        )
+        with patch("sys.argv", ["sandboxshift", "run", str(workspace), "ls"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+    assert exc_info.value.code == 1
+
+
+def test_sensitivity_blocked_prints_findings_on_stderr(workspace, capsys):
+    """SensitivityBlockedError findings must be printed to stderr."""
+    findings = ["[content_scan] Hardcoded API key", "[file_pattern] .env file found"]
+    with patch("sandboxshift.cli.main.SandboxManager") as mock_cls, \
+         patch("sandboxshift.cli.main.PodmanRuntime"), \
+         patch("sandboxshift.cli.main.SensitivityScanner"), \
+         patch("sandboxshift.cli.main.load_workspace_config", return_value={}):
+        mock_cls.return_value.run = AsyncMock(
+            side_effect=SensitivityBlockedError(findings)
+        )
+        with patch("sys.argv", ["sandboxshift", "run", str(workspace), "ls"]):
+            with pytest.raises(SystemExit):
+                main()
+    err = capsys.readouterr().err
+    assert "[sensitive] [content_scan] Hardcoded API key" in err
+    assert "[sensitive] [file_pattern] .env file found" in err
+
+
+def test_sensitivity_blocked_prints_skip_hint(workspace, capsys):
+    """CLI must print the --skip-sensitivity-check hint when blocked."""
+    with patch("sandboxshift.cli.main.SandboxManager") as mock_cls, \
+         patch("sandboxshift.cli.main.PodmanRuntime"), \
+         patch("sandboxshift.cli.main.SensitivityScanner"), \
+         patch("sandboxshift.cli.main.load_workspace_config", return_value={}):
+        mock_cls.return_value.run = AsyncMock(
+            side_effect=SensitivityBlockedError(["some finding"])
+        )
+        with patch("sys.argv", ["sandboxshift", "run", str(workspace), "ls"]):
+            with pytest.raises(SystemExit):
+                main()
+    err = capsys.readouterr().err
+    assert "--skip-sensitivity-check" in err
+
+
+def test_skip_sensitivity_check_flag_passes_to_config(
+    tmp_path: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--skip-sensitivity-check sets SandboxConfig.skip_sensitivity_check=True."""
+    _, instance = mock_manager
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(tmp_path), "pytest",
+        "--skip-sensitivity-check",
+    ])
+    with pytest.raises(SystemExit):
+        main()
+    call_kwargs = instance.run.call_args.kwargs
+    assert call_kwargs["config"].skip_sensitivity_check is True
