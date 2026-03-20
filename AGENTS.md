@@ -135,6 +135,8 @@ network:
 resources:
   cpu: 2
   memory: 4GB
+  min_cpu: 4              # burst to cloud if local has fewer CPUs
+  min_memory: 8GB         # burst to cloud if local has less available RAM
 
 sensitivity:
   level: auto             # auto-detect sensitive data
@@ -365,6 +367,7 @@ sandboxshift/
 | 52 | Port conflict detection | `_check_port_available(host_port)` called in `provision()` before container starts; raises `OSError` | Fail-fast before container starts; avoids silent bind failure | 2026-03-19 |
 | 53 | PodmanRuntime entrypoint override | Always pass `--entrypoint /bin/sh` before the image name; container command is then `-c <task>` | Chainguard python sets `ENTRYPOINT ["python"]`; without override `podman run ... image /bin/sh -c task` becomes `python /bin/sh -c task`, causing Python to exec /bin/sh as a script and crash with ELF-header SyntaxError | 2026-03-19 |
 | 54 | Unrestricted network mode | `network_allow: ["*"]` → slirp4netns without --dns=none, no --add-host; audited as network_unrestricted_mode with warning | Opt-in escape hatch for trusted workspaces that need arbitrary internet (e.g. npm install from many CDN hosts); intentionally weakens Layer 4; always logged so the operator can see it happened | 2026-03-20 |
+| 55 | min_cpu_required / min_memory_mb_required | SandboxConfig fields (default 0/0.0 = disabled); BurstEngine checks after FORCE_LOCAL, before RAM threshold; violation → cloud, confidence=forced; CPU read failure → cloud, confidence=forced (fail-closed) | Explicit resource minimums are hard requirements — if local can't satisfy them, cloud is the only valid target; CPU read failure treated same as unsatisfied requirement (fail-closed principle); YAML keys: `resources.min_cpu` and `resources.min_memory` | 2026-03-20 |
 
 ---
 
