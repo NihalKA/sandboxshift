@@ -28,11 +28,13 @@ secrets.yaml
 *credentials*
 settings.json
 
-# Terraform state — contains sensitive data
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.backup
-terraform/.terraform.lock.hcl
+# Terraform state — contains sensitive data (ARNs, resource IDs)
+# ** glob matches terraform/fargate/ and any nested directory
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.backup
+**/*.tfstate.*.backup
+**/.terraform.lock.hcl
 
 # IDE
 .vscode/settings.json
