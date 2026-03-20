@@ -64,15 +64,63 @@ ensure_ecr_repo() {
   fi
 }
 
+# podman_push_with_retry <ecr_tag>
+#
+# Podman on macOS pushes through a QEMU VM whose virtual network stack has an
+# MTU mismatch with AWS endpoints. This causes "write: broken pipe" mid-transfer
+# on large blobs. Two mitigations applied here:
+#
+#   1. Lower the VM NIC MTU to 1200 before the first push (fixes the root cause).
+#      Uses `podman machine ssh` so it targets whatever machine is currently
+#      running. Silently skipped if not in a Podman machine environment.
+#
+#   2. Shell-level retry loop (up to 5 attempts, 15s backoff). Podman's built-in
+#      --retry flag retries at the operation level but cannot recover from a
+#      broken TCP connection mid-blob; a fresh attempt from the shell can.
+#
+FIX_MTU_DONE=0
+
+podman_push_with_retry() {
+  local ecr_tag="$1"
+  local max_attempts=5
+  local attempt=1
+  local delay=15
+
+  # Apply MTU fix once per script run, before the first push.
+  if [[ "${FIX_MTU_DONE}" -eq 0 ]]; then
+    info "Lowering Podman VM MTU to 1200 (prevents broken-pipe on large pushes)..."
+    podman machine ssh "sudo ip link set dev eth0 mtu 1200" 2>/dev/null \
+      && ok "MTU set to 1200" \
+      || warn "MTU fix skipped (not in a Podman machine environment — OK on Linux)"
+    FIX_MTU_DONE=1
+  fi
+
+  while [[ ${attempt} -le ${max_attempts} ]]; do
+    info "Pushing ${ecr_tag} (attempt ${attempt}/${max_attempts})..."
+    if podman push "${ecr_tag}"; then
+      ok "Pushed ${ecr_tag}"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [[ ${attempt} -le ${max_attempts} ]]; then
+      warn "Push failed. Retrying in ${delay}s..."
+      sleep "${delay}"
+      delay=$((delay * 2))   # exponential back-off: 15 → 30 → 60 → 120s
+    fi
+  done
+
+  error "Failed to push ${ecr_tag} after ${max_attempts} attempts."
+}
+
 build_and_push() {
   local image_dir="$1"   # e.g. images/python
   local local_tag="$2"   # e.g. sandboxshift/runtime-python:3.11
   local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
 
-  info "Building ${local_tag} (linux/amd64)..."
-  # --pull=always  — force-pull the AMD64 base image from the registry, never
-  #                  reuse cached layers that may have been built for ARM64.
-  # --platform     — cross-compile to AMD64 (required on Apple Silicon).
+  info "Building ${local_tag} (linux/amd64, --pull=always)..."
+  # --pull=always  — force-pull the AMD64 base from the registry; never reuse
+  #                  cached ARM64 layers from a previous build on Apple Silicon.
+  # --platform     — cross-compile to AMD64.
   podman build \
     --platform linux/amd64 \
     --pull=always \
@@ -80,15 +128,7 @@ build_and_push() {
     "${SCRIPT_DIR}/${image_dir}"
 
   podman tag "${local_tag}" "${ecr_tag}"
-
-  info "Pushing ${ecr_tag} (retries enabled)..."
-  # --retry 3 / --retry-delay 10s — handle transient ECR network blips (broken pipe).
-  podman push \
-    --retry 3 \
-    --retry-delay 10s \
-    "${ecr_tag}"
-
-  ok "Pushed ${ecr_tag}"
+  podman_push_with_retry "${ecr_tag}"
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
