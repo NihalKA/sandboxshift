@@ -110,7 +110,9 @@ if [[ -f "${SETUP_ENV}" ]]; then
   source "${SETUP_ENV}"
   info "Reusing existing setup: ${SETUP_ENV}"
 else
-  RAND_HASH=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)
+  # openssl rand -hex 3 → 3 random bytes = 6-char hex string.
+  # Avoids the tr|head SIGPIPE that kills the script under set -o pipefail.
+  RAND_HASH=$(openssl rand -hex 3)
   STATE_BUCKET="sandboxshift-tfstate-${ACCOUNT_ID}-${RAND_HASH}"
   LOCK_TABLE="sandboxshift-tfstate-lock-${RAND_HASH}"
 
@@ -252,11 +254,11 @@ echo ""
 info "Reading terraform outputs..."
 TF_OUTPUTS=$(terraform output -json)
 
-CLUSTER_ARN=$(echo "${TF_OUTPUTS}"         | jq -r '.cluster_arn.value')
-TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"        | jq -r '.task_def_arn.value')
-LOG_GROUP=$(echo "${TF_OUTPUTS}"           | jq -r '.log_group.value')
-SUBNET_IDS_JSON=$(echo "${TF_OUTPUTS}"     | jq -r '.subnet_ids.value | join(",")')
-SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"       | jq -r '.security_group_ids.value | join(",")')
+CLUSTER_ARN=$(echo "${TF_OUTPUTS}"        | jq -r '.cluster_arn.value')
+TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"       | jq -r '.task_def_arn.value')
+LOG_GROUP=$(echo "${TF_OUTPUTS}"          | jq -r '.log_group.value')
+SUBNET_IDS_JSON=$(echo "${TF_OUTPUTS}"    | jq -r '.subnet_ids.value | join(",")')
+SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"      | jq -r '.security_group_ids.value | join(",")')
 WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}"   | jq -r '.workspace_bucket_name.value')
 
 # Write env vars to ~/.sandboxshift/fargate.env for easy sourcing
