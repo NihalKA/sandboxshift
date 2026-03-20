@@ -23,7 +23,7 @@
 # Requirements:
 #   - aws CLI configured (aws configure or AWS_PROFILE)
 #   - terraform >= 1.5
-#   - docker (Docker Desktop or equivalent)
+#   - podman (brew install podman)
 #   - jq (brew install jq)
 
 set -euo pipefail
@@ -70,10 +70,10 @@ build_and_push() {
   local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
 
   info "Building ${local_tag}..."
-  docker build -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
-  docker tag "${local_tag}" "${ecr_tag}"
+  podman build -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
+  podman tag "${local_tag}" "${ecr_tag}"
   info "Pushing ${ecr_tag}..."
-  docker push "${ecr_tag}"
+  podman push "${ecr_tag}"
   ok "Pushed ${ecr_tag}"
 }
 
@@ -89,7 +89,7 @@ echo ""
 
 check_dependency aws       "Install with: brew install awscli"
 check_dependency terraform "Install with: brew install terraform"
-check_dependency docker    "Install Docker Desktop: https://www.docker.com/products/docker-desktop"
+check_dependency podman    "Install with: brew install podman && podman machine init && podman machine start"
 check_dependency jq        "Install with: brew install jq"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -237,13 +237,13 @@ ensure_ecr_repo "sandboxshift/runtime-multi"
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 4: Docker login to ECR
+# Step 4: Podman login to ECR
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Logging in to ECR..."
 aws ecr get-login-password --region "${REGION}" \
-  | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-ok "Docker logged in to ECR."
+  | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
+ok "Podman logged in to ECR."
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
