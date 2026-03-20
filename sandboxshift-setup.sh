@@ -66,17 +66,25 @@ ensure_ecr_repo() {
 
 # podman_push_with_retry <ecr_tag>
 #
-# Podman on macOS pushes through a QEMU VM whose virtual network stack has an
-# MTU mismatch with AWS endpoints. This causes "write: broken pipe" mid-transfer
-# on large blobs. Two mitigations applied here:
+# Podman on macOS routes pushes through a QEMU Linux VM. That VM's virtual NIC
+# defaults to MTU 1500, but the real path to AWS has overhead from macOS
+# virtualisation layers — the effective MTU is lower. When pushing large blobs
+# the VM tries to write oversized TCP segments; AWS drops them and the kernel
+# reports "write: broken pipe".
 #
-#   1. Lower the VM NIC MTU to 1200 before the first push (fixes the root cause).
-#      Uses `podman machine ssh` so it targets whatever machine is currently
-#      running. Silently skipped if not in a Podman machine environment.
+# Fix: lower the VM NIC MTU to 1200 once before the first push.
 #
-#   2. Shell-level retry loop (up to 5 attempts, 15s backoff). Podman's built-in
-#      --retry flag retries at the operation level but cannot recover from a
-#      broken TCP connection mid-blob; a fresh attempt from the shell can.
+#   - We SSH into the VM with `podman machine ssh` (targets whatever machine is
+#     currently running).
+#   - The default route interface is detected dynamically (`ip route show
+#     default`) — never hardcoded — because Podman VMs name it eth0, enp0s2,
+#     ens3, etc. depending on version and macOS release.
+#   - The fix is applied only once per script run (FIX_MTU_DONE flag).
+#   - Silently skipped if `podman machine ssh` is unavailable (Linux hosts where
+#     Podman runs natively have no VM and no MTU issue).
+#
+# A shell-level retry loop with exponential back-off is kept as a safety net
+# in case the MTU fix alone is not sufficient on some machines.
 #
 FIX_MTU_DONE=0
 
@@ -88,10 +96,15 @@ podman_push_with_retry() {
 
   # Apply MTU fix once per script run, before the first push.
   if [[ "${FIX_MTU_DONE}" -eq 0 ]]; then
-    info "Lowering Podman VM MTU to 1200 (prevents broken-pipe on large pushes)..."
-    podman machine ssh "sudo ip link set dev eth0 mtu 1200" 2>/dev/null \
-      && ok "MTU set to 1200" \
-      || warn "MTU fix skipped (not in a Podman machine environment — OK on Linux)"
+    info "Tuning Podman VM network MTU to prevent broken-pipe on large pushes..."
+    # Detect the default-route interface inside the VM dynamically so this works
+    # regardless of how the VM's kernel names the NIC (eth0, enp0s2, ens3, ...).
+    podman machine ssh \
+      'ETH=$(ip route show default | awk "/default/ {print \$5; exit}"); \
+       sudo ip link set dev "$ETH" mtu 1200 && echo "MTU 1200 set on $ETH"' \
+      2>/dev/null \
+      && ok "VM NIC MTU set to 1200" \
+      || warn "MTU tuning skipped (no Podman machine — OK on Linux)"
     FIX_MTU_DONE=1
   fi
 
