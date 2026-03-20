@@ -1,4 +1,4 @@
-"""SandboxShift CLI \u2014 sandboxshift run / sandboxshift audit tail."""
+"""SandboxShift CLI — sandboxshift run / sandboxshift audit tail."""
 
 from __future__ import annotations
 
@@ -16,7 +16,12 @@ from ..config_loader import load_workspace_config
 from ..observability.audit import AuditLogger
 from ..sandbox.burst.engine import BurstEngine
 from ..sandbox.detection.sensitivity import SensitivityScanner
-from ..sandbox.manager import RunResult, SandboxManager, SensitivityBlockedError
+from ..sandbox.manager import (
+    CloudRuntimeRequiredError,
+    RunResult,
+    SandboxManager,
+    SensitivityBlockedError,
+)
 from ..sandbox.runtime.fargate import FargateRuntime
 from ..sandbox.runtime.podman import PodmanRuntime
 
@@ -87,11 +92,11 @@ def _validate_allow_hosts(hosts: list[str]) -> None:
     """Reject bare IP addresses and non-FQDN values in --allow.
 
     "*" is accepted as a special sentinel for unrestricted network mode
-    (Decision #54). All other entries must be FQDNs \u2014 bare IPs including
+    (Decision #54). All other entries must be FQDNs — bare IPs including
     IMDS 169.254.169.254 are rejected.
     """
     for host in hosts:
-        # "*" is the unrestricted-network sentinel \u2014 bypass all checks.
+        # "*" is the unrestricted-network sentinel — bypass all checks.
         if host == "*":
             continue
         # Reject bare IP addresses outright (IPv4 and IPv6).
@@ -148,7 +153,7 @@ def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
 
 
 def _resolve_audit_log(args: argparse.Namespace) -> Path:
-    """Resolve audit log path: --audit-log arg \u2192 env var \u2192 default."""
+    """Resolve audit log path: --audit-log arg → env var → default."""
     if args.audit_log:
         return Path(args.audit_log).expanduser()
     env_val = os.environ.get("SANDBOXSHIFT_AUDIT_LOG", "").strip()
@@ -262,6 +267,19 @@ def _cmd_run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    except CloudRuntimeRequiredError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print(
+            "\nTo fix: set FARGATE_CLUSTER_ARN, FARGATE_TASK_DEFINITION_ARN, "
+            "FARGATE_SUBNET_IDS, FARGATE_SECURITY_GROUP_IDS, FARGATE_LOG_GROUP, "
+            "FARGATE_REGION environment variables.",
+            file=sys.stderr,
+        )
+        print(
+            "Or remove min_cpu / min_memory from sandboxshift.yaml to run locally.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print(f"Runtime: {result.runtime_mode}")
     print(f"Duration: {result.duration_seconds:.2f}s")
@@ -277,7 +295,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
 
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
-    # Resolve log path: --log arg \u2192 SANDBOXSHIFT_AUDIT_LOG env var \u2192 default
+    # Resolve log path: --log arg → SANDBOXSHIFT_AUDIT_LOG env var → default
     if args.log:
         log_path = Path(args.log).expanduser()
     else:

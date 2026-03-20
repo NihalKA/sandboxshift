@@ -1,13 +1,14 @@
 """Tests for SandboxManager — central SandboxShift orchestrator.
 
 Test groups:
-  Group 1: Constructor validation                    (2 tests)
-  Group 2: run() — local path                        (5 tests)
-  Group 3: run() — cloud path                        (4 tests)
-  Group 4: run() — sensitivity blocked               (3 tests)
-  Group 5: run() — cloud_runtime=None fallback       (3 tests)
-  Group 6: run() — destroy always called             (3 tests)
-  Group 7: run() — skip_sensitivity_check            (3 tests)
+  Group 1: Constructor validation                              (2 tests)
+  Group 2: run() — local path                                  (5 tests)
+  Group 3: run() — cloud path                                  (4 tests)
+  Group 4: run() — sensitivity blocked                         (3 tests)
+  Group 5: run() — cloud_runtime=None preferred fallback       (3 tests)
+  Group 6: run() — cloud_runtime=None forced → error           (3 tests)
+  Group 7: run() — destroy always called                       (3 tests)
+  Group 8: run() — skip_sensitivity_check                      (3 tests)
 
 asyncio_mode = "auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
 """
@@ -29,7 +30,12 @@ from sandboxshift.sandbox.detection.sensitivity import (
     SensitivityResult,
     SensitivityScanner,
 )
-from sandboxshift.sandbox.manager import RunResult, SandboxManager, SensitivityBlockedError
+from sandboxshift.sandbox.manager import (
+    CloudRuntimeRequiredError,
+    RunResult,
+    SandboxManager,
+    SensitivityBlockedError,
+)
 from sandboxshift.sandbox.runtime.base import Runtime, TaskResult
 
 
@@ -100,11 +106,12 @@ def _make_manager(
     scanner: MagicMock | None = None,
     audit_logger: MagicMock | None = None,
     mode: str = "local",
+    confidence: str = "preferred",
 ) -> SandboxManager:
     return SandboxManager(
         local_runtime=local_runtime or _make_runtime(),
         cloud_runtime=cloud_runtime,
-        burst_engine=burst_engine or _make_burst_engine(mode),
+        burst_engine=burst_engine or _make_burst_engine(mode, confidence),
         scanner=scanner or _make_scanner(),
         audit_logger=audit_logger or MagicMock(spec=AuditLogger),
     )
@@ -272,15 +279,15 @@ class TestSensitivityBlocked:
 
 
 # ---------------------------------------------------------------------------
-# Group 5: run() — cloud_runtime=None fallback
+# Group 5: run() — cloud_runtime=None preferred fallback
 # ---------------------------------------------------------------------------
 
 
-class TestCloudRuntimeNoneFallback:
-    async def test_falls_back_to_local_when_cloud_runtime_none(
-        self, tmp_path: Path
-    ) -> None:
-        """When cloud_runtime=None and decision==cloud, local_runtime must run."""
+class TestCloudRuntimeNonePreferredFallback:
+    """When cloud_runtime=None and confidence='preferred', fall back to local gracefully."""
+
+    async def test_falls_back_to_local_when_cloud_runtime_none(self, tmp_path: Path) -> None:
+        """When cloud_runtime=None and decision==cloud/preferred, local_runtime must run."""
         local = _make_runtime("ss-local-fallback")
         engine = _make_burst_engine(mode="cloud", confidence="preferred")
         manager = _make_manager(
@@ -298,9 +305,7 @@ class TestCloudRuntimeNoneFallback:
         result = await manager.run(tmp_path, "echo hi", SandboxConfig())
         assert result.runtime_mode == "local"
 
-    async def test_cloud_runtime_unavailable_audit_event_emitted(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_cloud_runtime_unavailable_audit_event_emitted(self, tmp_path: Path) -> None:
         """A 'cloud_runtime_unavailable' audit event must be recorded on fallback."""
         audit = MagicMock(spec=AuditLogger)
         engine = _make_burst_engine(mode="cloud", confidence="preferred")
@@ -315,7 +320,45 @@ class TestCloudRuntimeNoneFallback:
 
 
 # ---------------------------------------------------------------------------
-# Group 6: destroy always called
+# Group 6: run() — cloud_runtime=None forced → CloudRuntimeRequiredError
+# ---------------------------------------------------------------------------
+
+
+class TestCloudRuntimeNoneForced:
+    """When cloud_runtime=None and confidence='forced' (min_cpu or min_memory not met),
+    run() must raise CloudRuntimeRequiredError instead of silently falling back.
+    """
+
+    async def test_raises_cloud_runtime_required_error(self, tmp_path: Path) -> None:
+        engine = _make_burst_engine(mode="cloud", confidence="forced")
+        manager = _make_manager(cloud_runtime=None, burst_engine=engine)
+        with pytest.raises(CloudRuntimeRequiredError):
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+
+    async def test_no_provision_when_cloud_required_error(self, tmp_path: Path) -> None:
+        """Neither local nor cloud provision() must be called when CloudRuntimeRequiredError."""
+        local = _make_runtime("ss-local-never")
+        engine = _make_burst_engine(mode="cloud", confidence="forced")
+        manager = _make_manager(
+            local_runtime=local,
+            cloud_runtime=None,
+            burst_engine=engine,
+        )
+        with pytest.raises(CloudRuntimeRequiredError):
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+        local.provision.assert_not_awaited()
+
+    async def test_cloud_runtime_required_error_has_reason(self, tmp_path: Path) -> None:
+        """CloudRuntimeRequiredError.reason must surface the BurstDecision.reason."""
+        engine = _make_burst_engine(mode="cloud", confidence="forced")
+        manager = _make_manager(cloud_runtime=None, burst_engine=engine)
+        with pytest.raises(CloudRuntimeRequiredError) as exc_info:
+            await manager.run(tmp_path, "echo hi", SandboxConfig())
+        assert exc_info.value.reason == "test reason"
+
+
+# ---------------------------------------------------------------------------
+# Group 7: destroy always called
 # ---------------------------------------------------------------------------
 
 
@@ -336,9 +379,7 @@ class TestDestroyAlwaysCalled:
             await manager.run(tmp_path, "bad-cmd", SandboxConfig())
         local.destroy.assert_awaited_once_with("ss-execfail0000")
 
-    async def test_destroy_not_called_if_provision_raises(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_destroy_not_called_if_provision_raises(self, tmp_path: Path) -> None:
         """destroy() must NOT be called when provision() raises (no instance exists)."""
         local = _make_runtime("ss-provfail0000")
         local.provision.side_effect = RuntimeError("no disk space")
@@ -349,7 +390,7 @@ class TestDestroyAlwaysCalled:
 
 
 # ---------------------------------------------------------------------------
-# Group 7: run() — skip_sensitivity_check
+# Group 8: run() — skip_sensitivity_check
 # ---------------------------------------------------------------------------
 
 
