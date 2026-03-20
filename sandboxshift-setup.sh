@@ -40,9 +40,9 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 info()  { echo -e "${BLUE}[sandboxshift]${NC} $*"; }
-ok()    { echo -e "${GREEN}[sandboxshift]${NC} ✓ $*"; }
-warn()  { echo -e "${YELLOW}[sandboxshift]${NC} ⚠ $*"; }
-error() { echo -e "${RED}[sandboxshift]${NC} ✗ $*" >&2; exit 1; }
+ok()    { echo -e "${GREEN}[sandboxshift]${NC} \u2713 $*"; }
+warn()  { echo -e "${YELLOW}[sandboxshift]${NC} \u26a0 $*"; }
+error() { echo -e "${RED}[sandboxshift]${NC} \u2717 $*" >&2; exit 1; }
 
 check_dependency() {
   command -v "$1" &>/dev/null || error "'$1' is required but not installed. $2"
@@ -79,23 +79,41 @@ build_and_push() {
     -t "${local_tag}" \
     "${SCRIPT_DIR}/${image_dir}"
 
-  info "Pushing ${ecr_tag}..."
-  # skopeo copy is used instead of podman push.
+  # Push via: podman save  →  temp tar on macOS  →  skopeo push to ECR
   #
-  # On macOS, podman push routes image data through the QEMU Linux VM's TCP
-  # stack. That VM has TCP Segmentation Offload (TSO) enabled, which builds
-  # segments larger than the real path to AWS can carry — resulting in
-  # "write: broken pipe" regardless of MTU tuning.
+  # WHY NOT podman push:
+  #   podman push routes traffic through the QEMU Linux VM's TCP stack.
+  #   That VM has TCP Segmentation Offload (TSO) enabled, which assembles
+  #   packets larger than the real macOS → AWS path can carry, causing
+  #   "write: broken pipe" on large blob uploads, regardless of MTU tuning.
   #
-  # skopeo runs as a native macOS binary. It reads image layers from Podman's
-  # local storage via the Podman socket, then uploads to ECR using macOS's own
-  # TCP stack — completely bypassing the VM's broken networking. The push is
-  # reliable and fast with no workarounds needed.
+  # WHY NOT skopeo containers-storage:
+  #   On macOS, podman stores images inside the QEMU VM, not in the local
+  #   macOS containers storage. containers-storage: looks at the local store
+  #   and finds nothing — "does not resolve to an image ID".
   #
-  # Auth: skopeo reads ~/.config/containers/auth.json which podman login
-  # already wrote above — no separate login step required.
+  # THE FIX — two steps:
+  #   1. podman save  — runs as a podman client call; the image is streamed
+  #      out of the QEMU VM and written to a temp tar file on the macOS
+  #      filesystem. This uses the Podman REST socket, not raw TCP.
+  #   2. skopeo copy docker-archive:  — reads the local tar file and uploads
+  #      to ECR using macOS's own TCP stack. No VM involved. Reliable.
+  #
+  # Auth: podman login already wrote ~/.config/containers/auth.json above.
+  #       skopeo reads the same file automatically.
+  local tmp_tar
+  tmp_tar=$(mktemp -t "sandboxshift-image-XXXX.tar")
+  # shellcheck disable=SC2064
+  trap "rm -f '${tmp_tar}'" RETURN
+
+  info "Exporting ${local_tag} from Podman VM..."
+  podman save -o "${tmp_tar}" "${local_tag}"
+
+  info "Pushing ${ecr_tag} (via skopeo, native macOS TCP)..."
   skopeo copy \
-    "containers-storage:localhost/${local_tag}" \
+    --override-os  linux \
+    --override-arch amd64 \
+    "docker-archive:${tmp_tar}" \
     "docker://${ecr_tag}"
 
   ok "Pushed ${ecr_tag}"
@@ -106,9 +124,9 @@ build_and_push() {
 # ───────────────────────────────────────────────────────────────────────────────
 
 echo ""
-echo -e "${BLUE}██████████████████████████████████████████████${NC}"
-echo -e "${BLUE}  SandboxShift — AWS Infrastructure Setup${NC}"
-echo -e "${BLUE}██████████████████████████████████████████████${NC}"
+echo -e "${BLUE}\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588${NC}"
+echo -e "${BLUE}  SandboxShift \u2014 AWS Infrastructure Setup${NC}"
+echo -e "${BLUE}\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588${NC}"
 echo ""
 
 check_dependency aws       "Install with: brew install awscli"
@@ -374,14 +392,14 @@ echo ""
 # ───────────────────────────────────────────────────────────────────────────────
 
 echo -e "${GREEN}"
-echo "  ██████████████████████████████████████████████"
+echo "  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588"
 echo "  SandboxShift AWS setup complete!"
-echo "  ██████████████████████████████████████████████"
+echo "  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588"
 echo -e "${NC}"
 echo "  ECR registry:     ${ECR_REGISTRY}"
 echo "  Workspace bucket: ${WORKSPACE_BUCKET}"
 echo ""
-echo "  The CLI auto-loads Fargate credentials — no export needed."
+echo "  The CLI auto-loads Fargate credentials \u2014 no export needed."
 echo "  Just run:"
 echo ""
 echo -e "    ${YELLOW}sandboxshift run /tmp/my-project \"echo hello from fargate\" --ram-threshold 999${NC}"
