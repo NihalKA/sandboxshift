@@ -27,6 +27,9 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
           setup: "uv sync"          # shell command
           skip_sensitivity_check: true  # skip scan for trusted workspaces
 
+        workspace:
+          readonly: true            # mount workspace read-only inside container
+
         network:
           allow:
             - pypi.org
@@ -72,6 +75,11 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         result["setup_command"] = str(sandbox["setup"])
     if sandbox.get("skip_sensitivity_check"):
         result["skip_sensitivity_check"] = True
+
+    # ── workspace section ────────────────────────────────────────────────────
+    workspace = data.get("workspace") or {}
+    if "readonly" in workspace:
+        result["workspace_readonly"] = bool(workspace["readonly"])
 
     # ── network section ──────────────────────────────────────────────────────
     network = data.get("network") or {}
