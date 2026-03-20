@@ -37,6 +37,8 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         resources:
           cpu: 2
           memory: 4096              # MB, or "4GB" / "4096MB"
+          min_cpu: 4                # burst to cloud if local has fewer CPUs
+          min_memory: 8GB           # burst to cloud if local has less available RAM
 
         ports:
           - 8000:8000
@@ -50,7 +52,7 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         return {}
     if not _YAML_AVAILABLE:  # pragma: no cover
         warnings.warn(
-            "pyyaml is not installed — sandboxshift.yaml ignored. "
+            "pyyaml is not installed \u2014 sandboxshift.yaml ignored. "
             "Install it with: pip install pyyaml",
             stacklevel=2,
         )
@@ -60,14 +62,14 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
             data = yaml.safe_load(f) or {}
     except Exception:
         warnings.warn(
-            f"sandboxshift.yaml in {workspace_path} is invalid — ignoring",
+            f"sandboxshift.yaml in {workspace_path} is invalid \u2014 ignoring",
             stacklevel=2,
         )
         return {}
 
     result: dict[str, Any] = {}
 
-    # ── sandbox section ──────────────────────────────────────────────────────
+    # \u2500\u2500 sandbox section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     sandbox = data.get("sandbox") or {}
     if "timeout" in sandbox:
         result["timeout_seconds"] = int(sandbox["timeout"])
@@ -76,17 +78,17 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
     if sandbox.get("skip_sensitivity_check"):
         result["skip_sensitivity_check"] = True
 
-    # ── workspace section ────────────────────────────────────────────────────
+    # \u2500\u2500 workspace section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     workspace = data.get("workspace") or {}
     if "readonly" in workspace:
         result["workspace_readonly"] = bool(workspace["readonly"])
 
-    # ── network section ──────────────────────────────────────────────────────
+    # \u2500\u2500 network section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     network = data.get("network") or {}
     if "allow" in network:
         result["network_allow"] = list(network["allow"])
 
-    # ── resources section ────────────────────────────────────────────────────
+    # \u2500\u2500 resources section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     resources = data.get("resources") or {}
     if "cpu" in resources:
         result["cpu_limit"] = float(resources["cpu"])
@@ -98,8 +100,18 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
             result["memory_limit_mb"] = int(float(mem[:-2]))
         else:
             result["memory_limit_mb"] = int(mem)
+    if "min_cpu" in resources:
+        result["min_cpu_required"] = float(resources["min_cpu"])
+    if "min_memory" in resources:
+        min_mem = resources["min_memory"]
+        if isinstance(min_mem, str) and min_mem.upper().endswith("GB"):
+            result["min_memory_mb_required"] = int(float(min_mem[:-2]) * 1024)
+        elif isinstance(min_mem, str) and min_mem.upper().endswith("MB"):
+            result["min_memory_mb_required"] = int(float(min_mem[:-2]))
+        else:
+            result["min_memory_mb_required"] = int(min_mem)
 
-    # ── ports section ────────────────────────────────────────────────────────
+    # \u2500\u2500 ports section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     raw_ports = data.get("ports") or []
     parsed: list[tuple[int, int]] = []
     for p in raw_ports:

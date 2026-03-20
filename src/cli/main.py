@@ -1,4 +1,4 @@
-"""SandboxShift CLI — sandboxshift run / sandboxshift audit tail."""
+"""SandboxShift CLI \u2014 sandboxshift run / sandboxshift audit tail."""
 
 from __future__ import annotations
 
@@ -87,11 +87,11 @@ def _validate_allow_hosts(hosts: list[str]) -> None:
     """Reject bare IP addresses and non-FQDN values in --allow.
 
     "*" is accepted as a special sentinel for unrestricted network mode
-    (Decision #54). All other entries must be FQDNs — bare IPs including
+    (Decision #54). All other entries must be FQDNs \u2014 bare IPs including
     IMDS 169.254.169.254 are rejected.
     """
     for host in hosts:
-        # "*" is the unrestricted-network sentinel — bypass all checks.
+        # "*" is the unrestricted-network sentinel \u2014 bypass all checks.
         if host == "*":
             continue
         # Reject bare IP addresses outright (IPv4 and IPv6).
@@ -148,7 +148,7 @@ def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
 
 
 def _resolve_audit_log(args: argparse.Namespace) -> Path:
-    """Resolve audit log path: --audit-log arg → env var → default."""
+    """Resolve audit log path: --audit-log arg \u2192 env var \u2192 default."""
     if args.audit_log:
         return Path(args.audit_log).expanduser()
     env_val = os.environ.get("SANDBOXSHIFT_AUDIT_LOG", "").strip()
@@ -192,6 +192,9 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
     skip_scan = args.skip_sensitivity_check or yaml_cfg.get("skip_sensitivity_check", False)
     # workspace_readonly: YAML only (no CLI flag in V1).
     workspace_readonly = yaml_cfg.get("workspace_readonly", False)
+    # min resource requirements: YAML only (no CLI flags in V1).
+    min_cpu_required = yaml_cfg.get("min_cpu_required", 0.0)
+    min_memory_mb_required = yaml_cfg.get("min_memory_mb_required", 0)
 
     config = SandboxConfig(
         cpu_limit=args.cpu,
@@ -202,6 +205,8 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         ports=all_ports,
         skip_sensitivity_check=skip_scan,
         workspace_readonly=workspace_readonly,
+        min_cpu_required=min_cpu_required,
+        min_memory_mb_required=min_memory_mb_required,
     )
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
@@ -272,7 +277,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
 
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
-    # Resolve log path: --log arg → SANDBOXSHIFT_AUDIT_LOG env var → default
+    # Resolve log path: --log arg \u2192 SANDBOXSHIFT_AUDIT_LOG env var \u2192 default
     if args.log:
         log_path = Path(args.log).expanduser()
     else:

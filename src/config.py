@@ -28,6 +28,12 @@ class SandboxConfig:
         skip_sensitivity_check:   When True, skip the sensitive-data scan entirely.
                                   Use only for workspaces you own and trust.
                                   WARNING: disabling this weakens Security Layer 6.
+        min_cpu_required:         Minimum number of logical CPUs the task needs.
+                                  If local machine has fewer CPUs, BurstEngine will
+                                  force cloud execution. 0.0 = no requirement (default).
+        min_memory_mb_required:   Minimum available RAM in MB the task needs.
+                                  If local available RAM is less, BurstEngine will
+                                  force cloud execution. 0 = no requirement (default).
     """
 
     cpu_limit: float = 2.0
@@ -38,3 +44,5 @@ class SandboxConfig:
     setup_command: str | None = None
     ports: list[tuple[int, int]] = field(default_factory=list)
     skip_sensitivity_check: bool = False
+    min_cpu_required: float = 0.0
+    min_memory_mb_required: int = 0
