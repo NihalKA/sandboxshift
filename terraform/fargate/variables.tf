@@ -62,8 +62,3 @@ variable "allowed_egress_cidr_blocks" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
-
-variable "workspace_bucket_name" {
-  description = "Name for the S3 workspace staging bucket. Must be globally unique. Recommended: suffix with your 12-digit AWS account ID (e.g. sandboxshift-workspace-123456789012)."
-  type        = string
-}

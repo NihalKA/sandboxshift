@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -12,7 +16,21 @@ provider "aws" {
   region = var.aws_region
 }
 
-# ── VPC (optional default VPC convenience) ─────────────────────────────────────────────────
+# ── Current AWS identity (account ID used in bucket name) ──────────────────────
+
+data "aws_caller_identity" "current" {}
+
+# ── Random suffix for globally-unique bucket name ──────────────────────────────
+#
+# Stored in Terraform state — same suffix survives destroy/re-apply.
+# 3 bytes = 6-char hex string. Combined with account ID this is effectively
+# unique without requiring user input.
+
+resource "random_id" "workspace_suffix" {
+  byte_length = 3
+}
+
+# ── VPC (optional default VPC convenience) ─────────────────────────────────────
 
 data "aws_vpc" "default" {
   count   = var.use_default_vpc ? 1 : 0
@@ -27,7 +45,7 @@ data "aws_subnets" "default" {
   }
 }
 
-# ── ECS Cluster ────────────────────────────────────────────────────────────────────────────
+# ── ECS Cluster ────────────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "sandboxshift" {
   name = var.cluster_name
@@ -50,7 +68,7 @@ resource "aws_ecs_cluster_capacity_providers" "sandboxshift" {
   }
 }
 
-# ── CloudWatch Log Group ────────────────────────────────────────────────────────────────
+# ── CloudWatch Log Group ────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "sandboxshift" {
   name              = "/sandboxshift/tasks"
@@ -59,15 +77,15 @@ resource "aws_cloudwatch_log_group" "sandboxshift" {
   tags = local.common_tags
 }
 
-# ── S3 Workspace Staging Bucket ─────────────────────────────────────────────────────────────
+# ── S3 Workspace Staging Bucket ─────────────────────────────────────────────────
 #
-# Stores workspace files during Fargate task execution.
-# FargateRuntime uploads workspace contents here, then downloads inside the container.
-# All objects auto-expire after 1 day (safety net if destroy() fails).
+# Name is auto-generated: sandboxshift-ws-{account_id}-{6-char-hex}
+# No user input required — bucket name is derived from AWS account and a
+# random suffix stored in Terraform state.
 # Decision #25: AES256 SSE (not KMS) — no key management overhead for V1.
 
 resource "aws_s3_bucket" "workspace" {
-  bucket = var.workspace_bucket_name
+  bucket = local.workspace_bucket_name
 
   tags = local.common_tags
 }
@@ -111,7 +129,7 @@ resource "aws_s3_bucket_public_access_block" "workspace" {
   restrict_public_buckets = true
 }
 
-# ── IAM Role for ECS Task Execution ──────────────────────────────────────────────────────────────
+# ── IAM Role for ECS Task Execution ──────────────────────────────────────────────
 
 resource "aws_iam_role" "task_execution" {
   name = "${var.cluster_name}-task-execution"
@@ -133,7 +151,7 @@ resource "aws_iam_role_policy_attachment" "task_execution_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ── IAM Role for ECS Task (S3 workspace access) ─────────────────────────────────────────────────
+# ── IAM Role for ECS Task (S3 workspace access) ──────────────────────────────────
 
 resource "aws_iam_role" "task_role" {
   name = "${var.cluster_name}-task-role"
@@ -167,7 +185,7 @@ resource "aws_iam_role_policy" "task_s3" {
   })
 }
 
-# ── Security Group for Fargate Tasks ─────────────────────────────────────────────────────────────
+# ── Security Group for Fargate Tasks ─────────────────────────────────────────────
 
 resource "aws_security_group" "sandbox_task" {
   name        = "${var.cluster_name}-sandbox-task"
@@ -189,7 +207,7 @@ resource "aws_security_group" "sandbox_task" {
   tags = local.common_tags
 }
 
-# ── ECS Task Definition ───────────────────────────────────────────────────────────────────────
+# ── ECS Task Definition ───────────────────────────────────────────────────────────
 
 resource "aws_ecs_task_definition" "sandbox" {
   family                   = var.task_family
@@ -221,9 +239,11 @@ resource "aws_ecs_task_definition" "sandbox" {
   tags = local.common_tags
 }
 
-# ── Locals ─────────────────────────────────────────────────────────────────────────────────
+# ── Locals ─────────────────────────────────────────────────────────────────────
 
 locals {
+  workspace_bucket_name = "sandboxshift-ws-${data.aws_caller_identity.current.account_id}-${random_id.workspace_suffix.hex}"
+
   common_tags = {
     Project     = "SandboxShift"
     ManagedBy   = "Terraform"
