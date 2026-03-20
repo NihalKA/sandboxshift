@@ -23,8 +23,9 @@
 # Requirements:
 #   - aws CLI configured (aws configure or AWS_PROFILE)
 #   - terraform >= 1.5
-#   - podman (brew install podman)
-#   - jq (brew install jq)
+#   - podman  (brew install podman)
+#   - skopeo  (brew install skopeo)  — used for reliable cross-platform image push
+#   - jq      (brew install jq)
 
 set -euo pipefail
 
@@ -64,84 +65,40 @@ ensure_ecr_repo() {
   fi
 }
 
-# podman_push_with_retry <ecr_tag>
-#
-# Podman on macOS routes pushes through a QEMU Linux VM. That VM's virtual NIC
-# defaults to MTU 1500, but the real path to AWS has overhead from macOS
-# virtualisation layers — the effective MTU is lower. When pushing large blobs
-# the VM tries to write oversized TCP segments; AWS drops them and the kernel
-# reports "write: broken pipe".
-#
-# Fix: lower the VM NIC MTU to 1200 once before the first push.
-#
-#   - We SSH into the VM with `podman machine ssh` (targets whatever machine is
-#     currently running).
-#   - The default route interface is detected dynamically (`ip route show
-#     default`) — never hardcoded — because Podman VMs name it eth0, enp0s2,
-#     ens3, etc. depending on version and macOS release.
-#   - The fix is applied only once per script run (FIX_MTU_DONE flag).
-#   - Silently skipped if `podman machine ssh` is unavailable (Linux hosts where
-#     Podman runs natively have no VM and no MTU issue).
-#
-# A shell-level retry loop with exponential back-off is kept as a safety net
-# in case the MTU fix alone is not sufficient on some machines.
-#
-FIX_MTU_DONE=0
-
-podman_push_with_retry() {
-  local ecr_tag="$1"
-  local max_attempts=5
-  local attempt=1
-  local delay=15
-
-  # Apply MTU fix once per script run, before the first push.
-  if [[ "${FIX_MTU_DONE}" -eq 0 ]]; then
-    info "Tuning Podman VM network MTU to prevent broken-pipe on large pushes..."
-    # Detect the default-route interface inside the VM dynamically so this works
-    # regardless of how the VM's kernel names the NIC (eth0, enp0s2, ens3, ...).
-    podman machine ssh \
-      'ETH=$(ip route show default | awk "/default/ {print \$5; exit}"); \
-       sudo ip link set dev "$ETH" mtu 1200 && echo "MTU 1200 set on $ETH"' \
-      2>/dev/null \
-      && ok "VM NIC MTU set to 1200" \
-      || warn "MTU tuning skipped (no Podman machine — OK on Linux)"
-    FIX_MTU_DONE=1
-  fi
-
-  while [[ ${attempt} -le ${max_attempts} ]]; do
-    info "Pushing ${ecr_tag} (attempt ${attempt}/${max_attempts})..."
-    if podman push "${ecr_tag}"; then
-      ok "Pushed ${ecr_tag}"
-      return 0
-    fi
-    attempt=$((attempt + 1))
-    if [[ ${attempt} -le ${max_attempts} ]]; then
-      warn "Push failed. Retrying in ${delay}s..."
-      sleep "${delay}"
-      delay=$((delay * 2))   # exponential back-off: 15 → 30 → 60 → 120s
-    fi
-  done
-
-  error "Failed to push ${ecr_tag} after ${max_attempts} attempts."
-}
-
 build_and_push() {
   local image_dir="$1"   # e.g. images/python
   local local_tag="$2"   # e.g. sandboxshift/runtime-python:3.11
   local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
 
   info "Building ${local_tag} (linux/amd64, --pull=always)..."
-  # --pull=always  — force-pull the AMD64 base from the registry; never reuse
-  #                  cached ARM64 layers from a previous build on Apple Silicon.
-  # --platform     — cross-compile to AMD64.
+  # --pull=always  — force-pull the AMD64 base; never reuse cached ARM64 layers.
+  # --platform     — cross-compile to AMD64 on Apple Silicon.
   podman build \
     --platform linux/amd64 \
     --pull=always \
     -t "${local_tag}" \
     "${SCRIPT_DIR}/${image_dir}"
 
-  podman tag "${local_tag}" "${ecr_tag}"
-  podman_push_with_retry "${ecr_tag}"
+  info "Pushing ${ecr_tag}..."
+  # skopeo copy is used instead of podman push.
+  #
+  # On macOS, podman push routes image data through the QEMU Linux VM's TCP
+  # stack. That VM has TCP Segmentation Offload (TSO) enabled, which builds
+  # segments larger than the real path to AWS can carry — resulting in
+  # "write: broken pipe" regardless of MTU tuning.
+  #
+  # skopeo runs as a native macOS binary. It reads image layers from Podman's
+  # local storage via the Podman socket, then uploads to ECR using macOS's own
+  # TCP stack — completely bypassing the VM's broken networking. The push is
+  # reliable and fast with no workarounds needed.
+  #
+  # Auth: skopeo reads ~/.config/containers/auth.json which podman login
+  # already wrote above — no separate login step required.
+  skopeo copy \
+    "containers-storage:localhost/${local_tag}" \
+    "docker://${ecr_tag}"
+
+  ok "Pushed ${ecr_tag}"
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -157,6 +114,7 @@ echo ""
 check_dependency aws       "Install with: brew install awscli"
 check_dependency terraform "Install with: brew install terraform"
 check_dependency podman    "Install with: brew install podman && podman machine init && podman machine start"
+check_dependency skopeo    "Install with: brew install skopeo"
 check_dependency jq        "Install with: brew install jq"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -305,12 +263,13 @@ echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Step 4: Podman login to ECR
+# (podman login writes ~/.config/containers/auth.json which skopeo reads)
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Logging in to ECR..."
 aws ecr get-login-password --region "${REGION}" \
   | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
-ok "Podman logged in to ECR."
+ok "ECR credentials stored (used by both podman and skopeo)."
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
