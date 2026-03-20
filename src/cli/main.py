@@ -30,6 +30,7 @@ from ..sandbox.runtime.podman import PodmanRuntime
 # ---------------------------------------------------------------------------
 
 _DEFAULT_AUDIT_LOG: Path = Path.home() / ".sandboxshift" / "audit.log"
+_FARGATE_ENV_FILE: Path = Path.home() / ".sandboxshift" / "fargate.env"
 
 _SENSITIVE_ROOTS: tuple[Path, ...] = (
     Path.home() / ".aws",
@@ -60,6 +61,44 @@ _MEMORY_MB_MIN = 128
 _MEMORY_MB_MAX = 65536
 _CPU_MIN = 0.25
 _CPU_MAX = 64.0
+
+
+# ---------------------------------------------------------------------------
+# Auto-load ~/.sandboxshift/fargate.env
+# ---------------------------------------------------------------------------
+
+def _load_fargate_env() -> None:
+    """Load FARGATE_* vars from ~/.sandboxshift/fargate.env into os.environ.
+
+    Only sets variables that are not already present in the environment —
+    explicit shell exports always take precedence.
+
+    Parses lines of the form:
+        export KEY="VALUE"
+        export KEY=VALUE
+    Silently ignores comments, blank lines, and malformed lines.
+    """
+    if not _FARGATE_ENV_FILE.exists():
+        return
+    try:
+        text = _FARGATE_ENV_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip leading "export " if present.
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        # Strip surrounding quotes from value.
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +432,10 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Auto-load ~/.sandboxshift/fargate.env before anything else.
+    # Explicit shell exports always win — this only fills in missing vars.
+    _load_fargate_env()
+
     parser = _build_parser()
     args = parser.parse_args()
     if args.command == "run":
