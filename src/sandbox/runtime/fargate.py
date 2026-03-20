@@ -396,6 +396,8 @@ class FargateRuntime(Runtime):
         """Poll ECS until the task reaches STOPPED status or timeout."""
         deadline = time.monotonic() + state.config.timeout_seconds
         ecs = self._session.client("ecs", region_name=self._region)
+        start = time.monotonic()
+        print("[sandboxshift] Fargate task started — waiting for completion...", flush=True)
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -406,7 +408,11 @@ class FargateRuntime(Runtime):
                 ecs.describe_tasks, cluster=state.cluster_arn, tasks=[task_arn]
             )
             task_desc = response["tasks"][0]
-            if task_desc["lastStatus"] == "STOPPED":
+            status = task_desc["lastStatus"]
+            elapsed = int(time.monotonic() - start)
+            print(f"\r[sandboxshift] {status} ({elapsed}s)...", end="", flush=True)
+            if status == "STOPPED":
+                print()  # newline after the final \r line
                 return
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -429,14 +435,19 @@ class FargateRuntime(Runtime):
     ) -> tuple[str, str]:
         """Fetch CloudWatch logs for the task. Never raises. Returns (stdout, stderr).
 
+        ECS CloudWatch stream name format:
+          {awslogs-stream-prefix}/{container_name}/{task_short_id}
+        where task_short_id is the last '/'-separated segment of the task ARN.
+
         stderr is always empty string in V1.
         """
         try:
             logs = self._session.client("logs", region_name=self._region)
-            # V1 simplification: stream name uses awslogs-stream-prefix + container_name + task_id.
-            # Exact stream name depends on ECS task ID (last segment of taskArn).
-            # Using instance_id as approximation; adjust when real CW data is observed.
-            stream_name = f"sandboxshift/{instance_id}"
+            # Derive the stream name from the ECS task ARN.
+            # ECS creates streams as: sandboxshift/sandbox/{task_short_id}
+            # task ARN format: arn:aws:ecs:region:account:task/cluster/TASK_SHORT_ID
+            task_short_id = (state.ecs_task_arn or "").split("/")[-1]
+            stream_name = f"sandboxshift/sandbox/{task_short_id}"
             response = logs.get_log_events(
                 logGroupName=state.log_group,
                 logStreamName=stream_name,

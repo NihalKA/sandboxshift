@@ -69,8 +69,8 @@ build_and_push() {
   local local_tag="$2"   # e.g. sandboxshift/runtime-python:3.11
   local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
 
-  info "Building ${local_tag}..."
-  podman build -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
+  info "Building ${local_tag} (linux/amd64)..."
+  podman build --platform linux/amd64 -t "${local_tag}" "${SCRIPT_DIR}/${image_dir}"
   podman tag "${local_tag}" "${ecr_tag}"
   info "Pushing ${ecr_tag}..."
   podman push "${ecr_tag}"
@@ -250,7 +250,7 @@ echo ""
 # Step 5: Build and push runtime images
 # ───────────────────────────────────────────────────────────────────────────────
 
-info "Building and pushing runtime images (this may take a few minutes)..."
+info "Building and pushing runtime images (linux/amd64 — this may take a few minutes)..."
 echo ""
 
 build_and_push \
