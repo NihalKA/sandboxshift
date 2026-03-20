@@ -130,7 +130,7 @@ network:
   allow:
     - pypi.org
     - api.github.com
-  block_all_others: true
+  # Use ["*"] to allow all outbound traffic (disables Security Layer 4)
 
 resources:
   cpu: 2
@@ -243,14 +243,14 @@ sandboxshift/
 │   │   └── test_routes.py       ← 29 tests across 8 groups
 │   ├── cli/                     ← CLI tests ✓ BUILT
 │   │   ├── __init__.py
-│   │   └── test_main.py         ← 29 tests across 7 groups (incl. 5 port tests)
+│   │   └── test_main.py         ← 33 tests across 8 groups
 │   ├── observability/           ← AuditLogger tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
 │   └── sandbox/
-│       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (20 tests)
+│       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (23 tests across 7 groups)
 │       ├── runtime/
-│       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (41 tests)
+│       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (46 tests across 9 groups)
 │       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (29 tests)
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
@@ -364,6 +364,7 @@ sandboxshift/
 | 51 | Streaming subprocess trigger | `subprocess.Popen` + line stream used when `config.ports` non-empty; `subprocess.run(capture_output=True)` kept otherwise | Long-running servers need real-time output; batch tasks benefit from captured stdout | 2026-03-19 |
 | 52 | Port conflict detection | `_check_port_available(host_port)` called in `provision()` before container starts; raises `OSError` | Fail-fast before container starts; avoids silent bind failure | 2026-03-19 |
 | 53 | PodmanRuntime entrypoint override | Always pass `--entrypoint /bin/sh` before the image name; container command is then `-c <task>` | Chainguard python sets `ENTRYPOINT ["python"]`; without override `podman run ... image /bin/sh -c task` becomes `python /bin/sh -c task`, causing Python to exec /bin/sh as a script and crash with ELF-header SyntaxError | 2026-03-19 |
+| 54 | Unrestricted network mode | `network_allow: ["*"]` → slirp4netns without --dns=none, no --add-host; audited as network_unrestricted_mode with warning | Opt-in escape hatch for trusted workspaces that need arbitrary internet (e.g. npm install from many CDN hosts); intentionally weakens Layer 4; always logged so the operator can see it happened | 2026-03-20 |
 
 ---
 
