@@ -62,7 +62,7 @@ def _step(msg: str) -> None:
 
 def _ok(msg: str) -> None:
     """Print a green completion line."""
-    print(f"{_C_GREEN}[sandboxshift]{_C_RESET} ✓ {msg}", flush=True)
+    print(f"{_C_GREEN}[sandboxshift]{_C_RESET} \u2713 {msg}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +382,15 @@ class FargateRuntime(Runtime):
     def _run_ecs_task(
         self, instance_id: str, task: str, state: _FargateInstanceState
     ) -> str:
-        """Launch an ECS Fargate task and return its task ARN."""
+        """Launch an ECS Fargate task and return its task ARN.
+
+        The Chainguard runtime images set ENTRYPOINT ["python"] (or ["node"]),
+        which would cause ECS to run `python /bin/sh -c <task>` if only
+        `command` is overridden. We always override `entryPoint` to
+        ["/bin/sh"] and set `command` to ["-c", task] so the effective
+        invocation is `/bin/sh -c <task>` regardless of the image default.
+        (Mirrors Decision #53 for PodmanRuntime.)
+        """
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
             cluster=state.cluster_arn,
@@ -399,7 +407,15 @@ class FargateRuntime(Runtime):
                 "containerOverrides": [
                     {
                         "name": "sandbox",
-                        "command": ["/bin/sh", "-c", task],
+                        # entryPoint overrides the image's ENTRYPOINT.
+                        # Chainguard images set ENTRYPOINT ["python"] / ["node"];
+                        # without this override ECS would run:
+                        #   python /bin/sh -c <task>
+                        # which makes Python try to execute /bin/sh as a script
+                        # and crash with: SyntaxError: source code cannot contain
+                        # null bytes  (ELF header interpreted as Python source).
+                        "entryPoint": ["/bin/sh"],
+                        "command": ["-c", task],
                         "environment": [
                             {"name": "SS_BUCKET",  "value": state.bucket_name},
                             {"name": "SS_PREFIX",  "value": "workspace/"},
@@ -503,34 +519,36 @@ class FargateRuntime(Runtime):
                 logStreamName=stream_name,
                 startFromHead=True,
             )
-            events = response.get("events", [])
-            combined = "\n".join(e["message"] for e in events)
-            return combined, ""
-        except Exception as exc:  # noqa: BLE001
-            self._audit.record({
-                "event": "cloudwatch_logs_unavailable",
-                "instance_id": instance_id,
-                "error": str(exc),
-            })
+            lines = [e["message"] for e in response.get("events", [])]
+            return "\n".join(lines), ""
+        except Exception:  # noqa: BLE001
             return "", ""
 
     def _stop_ecs_task(self, state: _FargateInstanceState) -> None:
-        """Stop the ECS task. Ignores errors (task may already be stopped)."""
+        """Stop the ECS task. No-op if already stopped."""
+        if not state.ecs_task_arn:
+            return
         ecs = self._session.client("ecs", region_name=self._region)
         try:
-            ecs.stop_task(cluster=state.cluster_arn, task=state.ecs_task_arn)
+            ecs.stop_task(
+                cluster=state.cluster_arn,
+                task=state.ecs_task_arn,
+                reason="SandboxShift destroy()",
+            )
         except Exception:  # noqa: BLE001
-            pass  # task may already be stopped
+            pass
 
     def _delete_bucket(self, bucket_name: str) -> None:
-        """Delete all objects in the bucket then delete the bucket itself."""
+        """Delete all objects then the S3 bucket. No-op if bucket doesn't exist."""
         s3 = self._session.client("s3", region_name=self._region)
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket_name):
-            objects = page.get("Contents", [])
-            if objects:
-                s3.delete_objects(
-                    Bucket=bucket_name,
-                    Delete={"Objects": [{"Key": o["Key"]} for o in objects]},
-                )
-        s3.delete_bucket(Bucket=bucket_name)
+        try:
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket_name):
+                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                if objects:
+                    s3.delete_objects(
+                        Bucket=bucket_name, Delete={"Objects": objects}
+                    )
+            s3.delete_bucket(Bucket=bucket_name)
+        except Exception:  # noqa: BLE001
+            pass
