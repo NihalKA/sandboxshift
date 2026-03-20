@@ -20,7 +20,7 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# ── Random suffix for globally-unique bucket name ──────────────────────────────
+# ── Random suffix for globally-unique bucket name ──────────────────────────
 #
 # Stored in Terraform state — same suffix survives destroy/re-apply.
 # 3 bytes = 6-char hex string. Combined with account ID this is effectively
@@ -30,7 +30,7 @@ resource "random_id" "workspace_suffix" {
   byte_length = 3
 }
 
-# ── VPC (optional default VPC convenience) ─────────────────────────────────────
+# ── VPC (optional default VPC convenience) ────────────────────────────────
 
 data "aws_vpc" "default" {
   count   = var.use_default_vpc ? 1 : 0
@@ -45,7 +45,7 @@ data "aws_subnets" "default" {
   }
 }
 
-# ── ECS Cluster ────────────────────────────────────────────────────────────────
+# ── ECS Cluster ─────────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "sandboxshift" {
   name = var.cluster_name
@@ -68,7 +68,7 @@ resource "aws_ecs_cluster_capacity_providers" "sandboxshift" {
   }
 }
 
-# ── CloudWatch Log Group ────────────────────────────────────────────────────────
+# ── CloudWatch Log Group ──────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "sandboxshift" {
   name              = "/sandboxshift/tasks"
@@ -77,7 +77,7 @@ resource "aws_cloudwatch_log_group" "sandboxshift" {
   tags = local.common_tags
 }
 
-# ── S3 Workspace Staging Bucket ─────────────────────────────────────────────────
+# ── S3 Workspace Staging Bucket ───────────────────────────────────────────────
 #
 # Name is auto-generated: sandboxshift-ws-{account_id}-{6-char-hex}
 # No user input required — bucket name is derived from AWS account and a
@@ -129,7 +129,7 @@ resource "aws_s3_bucket_public_access_block" "workspace" {
   restrict_public_buckets = true
 }
 
-# ── IAM Role for ECS Task Execution ──────────────────────────────────────────────
+# ── IAM Role for ECS Task Execution ──────────────────────────────────────────
 
 resource "aws_iam_role" "task_execution" {
   name = "${var.cluster_name}-task-execution"
@@ -151,7 +151,7 @@ resource "aws_iam_role_policy_attachment" "task_execution_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ── IAM Role for ECS Task (S3 workspace access) ──────────────────────────────────
+# ── IAM Role for ECS Task (S3 workspace access) ───────────────────────────
 
 resource "aws_iam_role" "task_role" {
   name = "${var.cluster_name}-task-role"
@@ -185,7 +185,7 @@ resource "aws_iam_role_policy" "task_s3" {
   })
 }
 
-# ── Security Group for Fargate Tasks ─────────────────────────────────────────────
+# ── Security Group for Fargate Tasks ─────────────────────────────────────────
 
 resource "aws_security_group" "sandbox_task" {
   name        = "${var.cluster_name}-sandbox-task"
@@ -207,7 +207,7 @@ resource "aws_security_group" "sandbox_task" {
   tags = local.common_tags
 }
 
-# ── ECS Task Definition ───────────────────────────────────────────────────────────
+# ── ECS Task Definition ──────────────────────────────────────────────────────────
 
 resource "aws_ecs_task_definition" "sandbox" {
   family                   = var.task_family
@@ -222,6 +222,19 @@ resource "aws_ecs_task_definition" "sandbox" {
     name      = "sandbox"
     image     = "${var.ecr_registry}/sandboxshift/runtime-python:3.11"
     essential = true
+
+    # entryPoint is set here in the task definition (not overrideable at
+    # run_task time via containerOverrides). This overrides the Chainguard
+    # image's default ENTRYPOINT ["python"] so that the command injected by
+    # FargateRuntime ("-c", "<task>") is passed to /bin/sh, not to python.
+    # Without this, ECS runs: python /bin/sh -c <task>, which makes Python
+    # try to execute /bin/sh as a script and crash with an ELF SyntaxError.
+    # (Mirrors Decision #53 for PodmanRuntime; ECS equivalent fix.)
+    entryPoint = ["/bin/sh"]
+
+    # Default command placeholder — always overridden by FargateRuntime at
+    # run_task time via containerOverrides.command = ["-c", "<task>"]
+    command = ["-c", "echo sandboxshift ready"]
 
     logConfiguration = {
       logDriver = "awslogs"
@@ -239,7 +252,7 @@ resource "aws_ecs_task_definition" "sandbox" {
   tags = local.common_tags
 }
 
-# ── Locals ─────────────────────────────────────────────────────────────────────
+# ── Locals ───────────────────────────────────────────────────────────────────────────
 
 locals {
   workspace_bucket_name = "sandboxshift-ws-${data.aws_caller_identity.current.account_id}-${random_id.workspace_suffix.hex}"

@@ -384,12 +384,13 @@ class FargateRuntime(Runtime):
     ) -> str:
         """Launch an ECS Fargate task and return its task ARN.
 
-        The Chainguard runtime images set ENTRYPOINT ["python"] (or ["node"]),
-        which would cause ECS to run `python /bin/sh -c <task>` if only
-        `command` is overridden. We always override `entryPoint` to
-        ["/bin/sh"] and set `command` to ["-c", task] so the effective
-        invocation is `/bin/sh -c <task>` regardless of the image default.
-        (Mirrors Decision #53 for PodmanRuntime.)
+        The task definition sets entryPoint=["/bin/sh"] to override the
+        Chainguard image's default ENTRYPOINT. Here we only override `command`
+        with ["-c", task] so the effective invocation is `/bin/sh -c <task>`.
+
+        Note: `entryPoint` is NOT a valid field in containerOverrides at
+        run_task time — it must be set in the task definition itself.
+        (Decision #53, ECS equivalent.)
         """
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
@@ -407,14 +408,8 @@ class FargateRuntime(Runtime):
                 "containerOverrides": [
                     {
                         "name": "sandbox",
-                        # entryPoint overrides the image's ENTRYPOINT.
-                        # Chainguard images set ENTRYPOINT ["python"] / ["node"];
-                        # without this override ECS would run:
-                        #   python /bin/sh -c <task>
-                        # which makes Python try to execute /bin/sh as a script
-                        # and crash with: SyntaxError: source code cannot contain
-                        # null bytes  (ELF header interpreted as Python source).
-                        "entryPoint": ["/bin/sh"],
+                        # command overrides CMD. entryPoint=["/bin/sh"] is fixed
+                        # in the task definition, so this becomes: /bin/sh -c <task>
                         "command": ["-c", task],
                         "environment": [
                             {"name": "SS_BUCKET",  "value": state.bucket_name},
