@@ -190,6 +190,8 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
     effective_allow = list(args.allow) if args.allow else yaml_cfg.get("network_allow", [])
     # skip_sensitivity_check: CLI --skip-sensitivity-check wins over YAML.
     skip_scan = args.skip_sensitivity_check or yaml_cfg.get("skip_sensitivity_check", False)
+    # workspace_readonly: YAML only (no CLI flag in V1).
+    workspace_readonly = yaml_cfg.get("workspace_readonly", False)
 
     config = SandboxConfig(
         cpu_limit=args.cpu,
@@ -199,6 +201,7 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         setup_command=effective_setup,
         ports=all_ports,
         skip_sensitivity_check=skip_scan,
+        workspace_readonly=workspace_readonly,
     )
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
