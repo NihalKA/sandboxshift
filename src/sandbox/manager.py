@@ -16,7 +16,7 @@ Audit events emitted:
   "run_start"                 — before scan; always emitted
   "sensitivity_check_skipped" — when config.skip_sensitivity_check is True
   "sensitivity_blocked"       — when findings caused the run to be blocked
-  "cloud_runtime_unavailable" — when decision==cloud but cloud_runtime is None
+  "cloud_runtime_unavailable" — when decision==cloud/preferred but cloud_runtime is None
   "run_complete"              — after successful execute + destroy
 """
 
@@ -52,6 +52,26 @@ class SensitivityBlockedError(Exception):
         super().__init__(
             f"Workspace contains sensitive data ({len(findings)} finding(s)). "
             "Pass skip_sensitivity_check=True to override."
+        )
+
+
+class CloudRuntimeRequiredError(Exception):
+    """Raised when BurstEngine makes a forced cloud decision but cloud_runtime is None.
+
+    A forced decision means a hard resource requirement (min_cpu or min_memory)
+    cannot be satisfied locally. The run is blocked entirely — it must not silently
+    fall back to local, as that would violate the operator's explicit requirement.
+
+    Attributes:
+        reason: The BurstDecision.reason string explaining why cloud was required.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            f"Cloud execution is required ({reason}) but no cloud runtime is configured. "
+            "Set FARGATE_* environment variables to enable cloud bursting, or remove "
+            "min_cpu / min_memory requirements from sandboxshift.yaml."
         )
 
 
@@ -97,8 +117,10 @@ class SandboxManager:
     Args:
         local_runtime:  Required. PodmanRuntime (or any Runtime) for local execution.
         cloud_runtime:  Optional. FargateRuntime for cloud execution.  When None
-                        and BurstEngine decides "cloud", falls back to local with
-                        an audit warning (fail-closed).
+                        and BurstEngine decides "cloud" with confidence="preferred",
+                        falls back to local with an audit warning (fail-closed).
+                        When None and confidence="forced" (min_cpu or min_memory
+                        requirement not met), raises CloudRuntimeRequiredError.
         burst_engine:   BurstEngine instance.  Decides local vs cloud.
         scanner:        SensitivityScanner instance.  Must run before burst_engine.
         audit_logger:   Optional AuditLogger.  Defaults to the V1 no-op stub.
@@ -139,8 +161,11 @@ class SandboxManager:
               If findings exist → emit "sensitivity_blocked" audit event and
               raise SensitivityBlockedError(findings). No execution occurs.
           3. BurstEngine.decide(scan_result, workspace, config) → BurstDecision.
-          4. If decision.mode == "cloud" but cloud_runtime is None: emit
-             "cloud_runtime_unavailable" audit event; override mode to "local".
+          4. If decision.mode == "cloud" but cloud_runtime is None:
+             - confidence="preferred" → emit "cloud_runtime_unavailable" audit
+               event; override mode to "local" (graceful fallback).
+             - confidence="forced" → emit "cloud_runtime_unavailable" audit
+               event; raise CloudRuntimeRequiredError. Run is blocked entirely.
           5. Select runtime: cloud_runtime if mode=="cloud", else local_runtime.
           6. runtime.provision(workspace, config) → instance_id.
           7. try: runtime.execute(instance_id, task, config) → TaskResult
@@ -163,6 +188,8 @@ class SandboxManager:
         Raises:
             SensitivityBlockedError: If the workspace contains sensitive data
                 and config.skip_sensitivity_check is False.
+            CloudRuntimeRequiredError: If BurstEngine forces cloud execution
+                (min_cpu or min_memory requirement) but cloud_runtime is None.
             Any exception raised by scanner.scan(), burst_engine.decide(),
             runtime.provision(), or runtime.execute() propagates to the caller.
         """
@@ -208,17 +235,22 @@ class SandboxManager:
         # Step 3: Burst decision
         decision = await self._burst_engine.decide(scan_result, workspace, config)
 
-        # Step 4: Cloud fallback when cloud_runtime is not available
+        # Step 4: Cloud fallback / block when cloud_runtime is not available.
+        # - confidence="preferred": RAM threshold advisory → fall back to local.
+        # - confidence="forced": hard requirement (min_cpu / min_memory) → block.
         runtime_mode = decision.mode
         if runtime_mode == "cloud" and self._cloud_runtime is None:
             self._audit.record(
                 {
                     "event": "cloud_runtime_unavailable",
                     "workspace": str(workspace),
-                    "reason": "cloud_runtime=None, falling back to local",
+                    "reason": decision.reason,
                     "original_confidence": decision.confidence,
                 }
             )
+            if decision.confidence == "forced":
+                raise CloudRuntimeRequiredError(decision.reason)
+            # confidence == "preferred" — advisory only, fall back gracefully.
             runtime_mode = "local"
 
         # Step 5: Runtime selection
