@@ -52,6 +52,26 @@ from .base import Runtime, TaskResult
 # ---------------------------------------------------------------------------
 
 _SENSITIVE_SKIP_PATTERNS: tuple[str, ...] = (".env", ".pem", ".key")
+
+# Dependency directories that are NEVER uploaded to S3. (Decision #58)
+# They are large, platform-specific, and are reinstalled fresh inside the ECS
+# task by _S3_DEPS_BOOTSTRAP (npm install / pip install). Skipping them makes
+# uploads orders of magnitude faster for typical Node/Python workspaces.
+_SKIP_DIRS: frozenset[str] = frozenset({
+    "node_modules",   # npm packages — npm install runs in container
+    "__pycache__",    # Python bytecode — not portable across platforms
+    ".venv",          # Python virtualenv — pip install runs in container
+    "venv",           # alternate virtualenv name
+    "env",            # another common virtualenv name
+    ".pytest_cache",  # pytest artefacts
+    ".tox",           # tox environments
+    ".eggs",          # Python egg-info
+    "dist",           # build output — may be large and stale
+    "build",          # build output
+    ".next",          # Next.js build cache
+    ".nuxt",          # Nuxt.js build cache
+})
+
 _MAX_WORKSPACE_BYTES: int = 500 * 1024 * 1024   # 500 MB
 _POLL_INTERVAL_SECONDS: float = 5.0
 _S3_DELETE_BATCH_SIZE: int = 1000
@@ -59,25 +79,6 @@ _DEFAULT_IMAGE = "sandboxshift/runtime-python:3.11"   # audit-only in V1
 _SERVER_START_TIMEOUT_SECONDS: int = 300             # 5 min to reach RUNNING
 _LOG_STREAM_WAIT_ATTEMPTS: int = 7                   # 7 x 5s = 35s max wait
 _LOG_TAIL_POLL_SECONDS: float = 2.0                  # CloudWatch poll interval
-
-# Directory names that are NEVER uploaded to S3. (Decision #58)
-# All of these are generated/installed inside the container by _S3_DEPS_BOOTSTRAP
-# (npm install / pip install). Uploading them wastes bandwidth, can exceed the
-# 500 MB cap, and was the root cause of the "6000 files" hang on a Node project.
-_SKIP_DIR_PARTS: frozenset[str] = frozenset({
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    "target",    # Rust / Maven
-    ".tox",
-    ".eggs",
-})
 
 _MARKER_IMAGES: dict[str, str] = {
     "requirements.txt": "sandboxshift/runtime-python:3.11",
@@ -273,9 +274,15 @@ class FargateRuntime(Runtime):
         """Provision a cloud sandbox.
 
         Uploads workspace files to the persistent S3 bucket under a unique
-        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames,
-        generated dependency directories (node_modules, __pycache__, .venv, etc.),
-        and the .git directory.
+        per-run prefix (workspace/{instance_id}/), skipping:
+          - sensitive filenames (.env, .pem, .key)
+          - .git directory
+          - local-only dependency directories (node_modules, __pycache__, .venv,
+            etc. — defined in _SKIP_DIRS; reinstalled fresh in ECS by
+            _S3_DEPS_BOOTSTRAP, Decision #58)
+
+        Prints [n/total] inline progress every 5 files so long uploads are
+        never silent.
 
         Args:
             workspace: Local directory to stage to S3. Must exist.
@@ -286,7 +293,7 @@ class FargateRuntime(Runtime):
 
         Raises:
             FileNotFoundError: If workspace does not exist.
-            ValueError:        If workspace exceeds 500 MB (after filtering).
+            ValueError:        If workspace (after filtering) exceeds 500 MB.
             RuntimeError:      If S3 upload fails.
         """
         if not workspace.exists():
@@ -296,40 +303,51 @@ class FargateRuntime(Runtime):
         # S3 prefix for this run — trailing slash is intentional
         s3_prefix = f"workspace/{instance_id}/"
 
-        # Build upload list — skip generated/dependency directories and sensitive
-        # filenames. node_modules / __pycache__ / .venv etc. are installed inside
-        # the container by _S3_DEPS_BOOTSTRAP; uploading them is pure waste.
+        # Collect files to upload — skip sensitive names, .git, and local-only
+        # dependency directories (node_modules etc. are reinstalled inside the
+        # ECS task by _S3_DEPS_BOOTSTRAP). (Decision #58)
         files = [
             f
             for f in workspace.rglob("*")
             if f.is_file()
             and not _sensitive_filename(f.name)
-            and _SKIP_DIR_PARTS.isdisjoint(f.relative_to(workspace).parts)
+            and ".git" not in f.relative_to(workspace).parts
+            and not any(
+                part in _SKIP_DIRS
+                for part in f.relative_to(workspace).parts
+            )
         ]
 
-        # Size check runs on the filtered list (consistent with what is uploaded).
-        total = sum(f.stat().st_size for f in files)
-        if total > _MAX_WORKSPACE_BYTES:
-            raise ValueError(f"workspace exceeds 500 MB limit: {total} bytes")
+        # 500 MB cap is checked against the filtered set (what we actually upload).
+        total_bytes = sum(f.stat().st_size for f in files)
+        if total_bytes > _MAX_WORKSPACE_BYTES:
+            raise ValueError(f"workspace exceeds 500 MB limit: {total_bytes} bytes")
 
-        n = len(files)
-        _step(f"Uploading {n} workspace file(s) to S3 ...")
+        total = len(files)
+        _step(
+            f"Uploading {total} file(s) to S3 "
+            f"(node_modules / dep dirs skipped) ..."
+        )
         for i, f in enumerate(files, 1):
-            print(
-                f"\r{_C_BLUE}[sandboxshift]{_C_RESET}"
-                f"  {i}/{n} \u2014 {f.name:<45}",
-                end="",
-                flush=True,
-            )
             try:
                 await asyncio.to_thread(
                     self._upload_file, self._workspace_bucket, s3_prefix, workspace, f
                 )
             except Exception as e:
-                print()  # end the \r line before raising
+                print()  # newline before error so progress line isn't clobbered
                 raise RuntimeError(f"S3 upload failed for {f}: {e}") from e
-        print()  # end the \r progress line
-        _ok(f"Workspace uploaded ({n} files, {total // 1024} KB)")
+            # Inline progress — overwrite the same line every 5 files and on
+            # the last file so long uploads are never silent.
+            if i % 5 == 0 or i == total:
+                print(
+                    f"\r{_C_BLUE}[sandboxshift]{_C_RESET}"
+                    f"  [{i}/{total}] uploading ...",
+                    end="",
+                    flush=True,
+                )
+        if total > 0:
+            print()  # newline after inline progress
+        _ok("Workspace uploaded")
 
         image = _detect_image(workspace)  # audit-only
         is_server = bool(config.ports)
@@ -354,6 +372,8 @@ class FargateRuntime(Runtime):
             "workspace": str(workspace),
             "network_allow": config.network_allow,
             "is_server": is_server,
+            "files_uploaded": total,
+            "bytes_uploaded": total_bytes,
         })
 
         return instance_id
@@ -935,16 +955,24 @@ class FargateRuntime(Runtime):
         except Exception:  # noqa: BLE001
             pass
 
-    def _delete_s3_prefix(self, bucket: str, prefix: str) -> None:
-        """Delete all S3 objects under the given prefix. No-op if prefix is empty."""
-        if not prefix:
-            return
+    def _delete_s3_prefix(self, bucket_name: str, s3_prefix: str) -> None:
+        """Delete all objects under an S3 prefix in batches of 1000."""
         s3 = self._session.client("s3", region_name=self._region)
         paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-            if objects:
-                s3.delete_objects(
-                    Bucket=bucket,
-                    Delete={"Objects": objects, "Quiet": True},
-                )
+        objects_to_delete: list[dict] = []
+
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix):
+            for obj in page.get("Contents", []):
+                objects_to_delete.append({"Key": obj["Key"]})
+                if len(objects_to_delete) >= _S3_DELETE_BATCH_SIZE:
+                    s3.delete_objects(
+                        Bucket=bucket_name,
+                        Delete={"Objects": objects_to_delete, "Quiet": True},
+                    )
+                    objects_to_delete = []
+
+        if objects_to_delete:
+            s3.delete_objects(
+                Bucket=bucket_name,
+                Delete={"Objects": objects_to_delete, "Quiet": True},
+            )
