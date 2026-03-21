@@ -1,9 +1,9 @@
 """PodmanRuntime — V1 local sandbox runtime for SandboxShift.
 
 Runs agent tasks inside rootless Podman containers with:
-- Auto-detected Chainguard base images (zero CVEs, Decision #2)
+- Auto-detected SandboxShift runtime images (Decision #19)
 - Enforced CPU, RAM, and network limits (Security Layer 5)
-- Non-root user (UID 65532 — Chainguard nonroot, Security Layer 2)
+- Non-root user (UID 10000 — sandboxshift, Security Layer 2)
 - --security-opt=no-new-privileges (prevents setuid escalation)
 - Workspace-only volume mount (no host path leakage)
 - Full audit trail via AuditLogger (Security Layer 7)
@@ -19,10 +19,8 @@ configured, subprocess.Popen is used for real-time stdout streaming
 does not appear anywhere in this module.
 
 --entrypoint /bin/sh is ALWAYS passed (Decision #53). This overrides any
-ENTRYPOINT baked into the base image (e.g. Chainguard python sets
-ENTRYPOINT ["python"]). Without this, podman run ... image /bin/sh -c task
-would be interpreted as python /bin/sh -c task, causing Python to try to
-execute /bin/sh as a script and crash with a SyntaxError on the ELF header.
+ENTRYPOINT baked into the base image. Without this, some images set their
+own ENTRYPOINT which would cause the /bin/sh -c task invocation to fail.
 
 Unrestricted network mode (Decision #54): when network_allow contains "*",
 the container uses slirp4netns without --dns=none and without any
@@ -52,22 +50,21 @@ from .base import Runtime, TaskResult
 # ---------------------------------------------------------------------------
 
 # These are the locally built sandboxshift images (see images/ directory).
-# They are based on Chainguard but include /bin/sh (BusyBox via :latest-dev
-# or wolfi-base) which is required by PodmanRuntime's /bin/sh -c invocation.
-# Using the upstream cgr.dev distroless images directly would fail because
-# those images have no shell.
+# They are based on Docker Hub official slim images (python:3.11-slim,
+# node:20-slim) and include /bin/sh, which is required by PodmanRuntime's
+# --entrypoint /bin/sh invocation (Decision #53).
 _DEFAULT_IMAGE = "sandboxshift/runtime-python:3.11"
-_NONROOT_USER = "65532:65532"  # Chainguard nonroot UID:GID — never root
+_NONROOT_USER = "10000:10000"  # sandboxshift nonroot UID:GID — never root
 
 _MARKER_IMAGES: dict[str, str] = {
     "requirements.txt": "sandboxshift/runtime-python:3.11",
     "package.json": "sandboxshift/runtime-node:20",
-    "go.mod": "cgr.dev/chainguard/go:latest",  # V2 — no local image yet
+    "go.mod": "sandboxshift/runtime-go:1.22",  # V2 — no local image yet
 }
 
 # Pip package cache — persisted on the host across container runs.
-# Container path matches Chainguard nonroot user (UID 65532) home in /home/nonroot.
-_PIP_CACHE_CONTAINER_PATH: str = "/home/nonroot/.cache/pip"
+# Container path matches the sandboxshift nonroot user (UID 10000) home.
+_PIP_CACHE_CONTAINER_PATH: str = "/home/sandboxshift/.cache/pip"
 
 
 def _pip_cache_host_path() -> Path:
@@ -328,7 +325,8 @@ class PodmanRuntime(Runtime):
             port_flags.extend(["-p", f"127.0.0.1:{h}:{c}"])
 
         # --entrypoint /bin/sh overrides any ENTRYPOINT set by the base image
-        # (e.g. Chainguard python sets ENTRYPOINT ["python"]).  Decision #53.
+        # (Decision #53). Ensures the task always runs via /bin/sh -c regardless
+        # of what the image's ENTRYPOINT is set to.
         cmd: list[str] = [
             "podman",
             "run",
