@@ -31,6 +31,11 @@ output "security_group_ids" {
   value       = [aws_security_group.sandbox_task.id]
 }
 
+output "server_security_group_id" {
+  description = "Server-mode security group ID (ALL TCP inbound) — attached by FargateRuntime only when ports are configured (env: FARGATE_SERVER_SECURITY_GROUP_ID)."
+  value       = aws_security_group.sandbox_server_task.id
+}
+
 output "workspace_bucket_name" {
   description = "S3 workspace staging bucket name — set as FARGATE_WORKSPACE_BUCKET env var on the API server."
   value       = aws_s3_bucket.workspace.id
