@@ -37,20 +37,39 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 
 ## Installation
 
-**Prerequisites:** Python 3.11+, [Podman](https://podman.io/getting-started/installation) (rootless)
+**Prerequisites — you install these:**
+
+| Requirement | For | Install |
+|-------------|-----|---------|
+| Python 3.11+ | always | [python.org](https://python.org) |
+| Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
+| AWS CLI v2 | cloud burst only | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
+
+**Everything else (Terraform, jq) is downloaded and managed by the setup script.**
 
 ```bash
 git clone https://github.com/NihalKA/sandboxshift
 cd sandboxshift
+chmod +x sandboxshift-setup.sh
 
 # Local mode only (no AWS needed)
 ./sandboxshift-setup.sh local
 
-# Local + cloud burst (requires AWS CLI + Terraform)
+# Local + cloud burst
 ./sandboxshift-setup.sh cloud
 ```
 
-The setup script handles everything: installs the Python package, builds runtime images into Podman, and (for cloud) creates ECR repos, pushes images, runs Terraform, and writes `~/.sandboxshift/fargate.env` (auto-loaded by the CLI — no `export` needed).
+The setup script:
+1. Downloads pinned **Terraform 1.5.7** into `~/.sandboxshift/bin/` — never touches your system Terraform
+2. Creates an **isolated Python venv** at `~/.sandboxshift/venv/` — your global Python env stays clean
+3. Symlinks the CLI to `~/.sandboxshift/bin/sandboxshift`
+4. Builds all runtime images into Podman
+5. *(cloud only)* Creates ECR repo, pushes image, runs `terraform apply`, writes `~/.sandboxshift/fargate.env`
+
+Then add the bin dir to your PATH:
+```bash
+echo 'export PATH="$HOME/.sandboxshift/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
 
 ---
 
@@ -79,7 +98,7 @@ See [Getting Started](docs/getting-started.md) for a full walkthrough.
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────┐
 │                      Your Machine                        │
 │                                                          │
 │   sandboxshift run /workspace "task"                     │
@@ -89,13 +108,13 @@ See [Getting Started](docs/getting-started.md) for a full walkthrough.
 │   │  Pre-flight      │                                   │
 │   │  1. Scan for     │── Sensitive data? ── Force local  │
 │   │     secrets      │                                   │
-│   │  2. Check RAM    │── RAM ok? ─────────── Run local   │
+│   │  2. Check RAM    │── RAM ok? ──────────── Run local  │
 │   │  3. Decide mode  │── RAM tight? ──── Burst to YOUR   │
 │   └─────────────────┘                      Fargate       │
 │                                                          │
 │   Either way: Hardened sandbox, full audit log           │
 │               Your data, your infrastructure             │
-└─────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘
 ```
 
 Mode is decided **before** the task starts. There is no mid-execution switching (V1 design).
@@ -164,19 +183,18 @@ Full reference: [docs/configuration.md](docs/configuration.md)
 
 ## Cloud Burst Setup
 
-Run the one-line setup:
-
 ```bash
 ./sandboxshift-setup.sh cloud
 ```
 
-That's it. The script:
-1. Builds runtime images and pushes `runtime-multi` to your ECR
-2. Runs `terraform apply` to provision the ECS cluster, S3 bucket, IAM roles, and security groups in your AWS account
-3. Writes `~/.sandboxshift/fargate.env` with all 8 connection variables
-4. The CLI auto-loads `fargate.env` on every run — no `export` commands needed
+The script manages everything:
+1. Downloads Terraform 1.5.7 to `~/.sandboxshift/bin/` (pinned, isolated)
+2. Builds `runtime-multi` and pushes it to your ECR
+3. Runs `terraform apply` — provisions ECS cluster, S3 bucket, IAM roles, security groups
+4. Writes `~/.sandboxshift/fargate.env` with all 8 connection variables
+5. The CLI auto-loads `fargate.env` on every run — no `export` needed ever
 
-**Prerequisites for cloud:** AWS CLI configured (`aws configure`), Terraform, jq.
+**Only prerequisite for cloud:** AWS CLI configured (`aws configure`).
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md)
 
@@ -237,6 +255,7 @@ sandboxshift audit tail [--lines N]
 - [ ] MCP server (Claude Desktop, Cursor integration)
 - [ ] LLM-based sensitivity classifier
 - [ ] Grafana observability dashboard
+- [ ] Homebrew tap (`brew install nihalka/tap/sandboxshift`)
 
 ### V3 — Planned
 - [ ] Kubernetes mode (Helm chart)

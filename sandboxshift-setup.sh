@@ -2,32 +2,34 @@
 # =============================================================================
 # sandboxshift-setup.sh
 #
-# One-script setup for SandboxShift.
+# One-script setup for SandboxShift. Manages its own isolated environment:
+#   - Downloads pinned Terraform 1.5.7 to ~/.sandboxshift/bin/ (always)
+#   - Creates an isolated Python venv at ~/.sandboxshift/venv/
+#   - Symlinks the CLI to ~/.sandboxshift/bin/sandboxshift
 #
+# Prerequisites the USER must install:
+#   - Python 3.11+
+#   - Podman (rootless)
+#   - AWS CLI v2  (cloud mode only)
+#
+# Everything else (Terraform, jq) is managed by this script.
+#
+# Usage:
 #   ./sandboxshift-setup.sh           # auto-detect (cloud if AWS creds present)
 #   ./sandboxshift-setup.sh local     # local mode only — no AWS needed
-#   ./sandboxshift-setup.sh cloud     # full cloud setup (ECR + Terraform + fargate.env)
-#
-# What this script does:
-#
-#   Both tracks:
-#     1. Check prerequisites
-#     2. pip install -e .
-#     3. Build all 3 runtime images into Podman local store
-#
-#   Cloud track additionally:
-#     4. Verify AWS credentials
-#     5. Resolve AWS account ID and region
-#     6. Create ECR repository (sandboxshift/runtime-multi) if missing
-#     7. Login Podman to ECR
-#     8. Tag and push runtime-multi to ECR
-#     9. Write terraform/fargate/terraform.tfvars
-#    10. terraform init && terraform apply
-#    11. Collect all terraform outputs → write ~/.sandboxshift/fargate.env
-#    12. Print a ready-to-use test command
+#   ./sandboxshift-setup.sh cloud     # full cloud setup
 # =============================================================================
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+SANDBOXSHIFT_HOME="${SANDBOXSHIFT_HOME:-$HOME/.sandboxshift}"
+BIN_DIR="$SANDBOXSHIFT_HOME/bin"
+VENV_DIR="$SANDBOXSHIFT_HOME/venv"
+TF_BIN="$BIN_DIR/terraform"
+TF_VERSION="1.5.7"
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -45,7 +47,7 @@ warn()  { echo -e "${YELLOW}[sandboxshift-setup]${RESET} ${YELLOW}⚠${RESET}  $
 die()   { echo -e "${RED}[sandboxshift-setup]${RESET} ${RED}✗${RESET} $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Script location — all paths are relative to repo root
+# Script location — all relative paths from repo root
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -54,12 +56,11 @@ cd "$SCRIPT_DIR"
 # Parse mode argument
 # ---------------------------------------------------------------------------
 MODE="${1:-auto}"
-if [[ "$MODE" != "local" && "$MODE" != "cloud" && "$MODE" != "auto" ]]; then
+[[ "$MODE" != "local" && "$MODE" != "cloud" && "$MODE" != "auto" ]] && \
   die "Unknown mode '${MODE}'. Usage: $0 [local|cloud|auto]"
-fi
 
 # ---------------------------------------------------------------------------
-# Step 0: auto-detect mode
+# Step 0: Auto-detect mode
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "auto" ]]; then
   step "Auto-detecting setup mode ..."
@@ -74,67 +75,140 @@ if [[ "$MODE" == "auto" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 1: Check prerequisites
+# Step 1: Check user-installed prerequisites
 # ---------------------------------------------------------------------------
 step "Checking prerequisites ..."
 
 check_cmd() {
-  local cmd="$1" install_hint="$2"
-  if ! command -v "$cmd" &>/dev/null; then
-    die "'${cmd}' not found. ${install_hint}"
-  fi
+  local cmd="$1" hint="$2"
+  command -v "$cmd" &>/dev/null || die "'${cmd}' not found. ${hint}"
 }
 
-check_cmd python3  "Install Python 3.11+: https://python.org"
-check_cmd pip      "Install pip: https://pip.pypa.io"
-check_cmd podman   "Install Podman: https://podman.io/getting-started/installation"
+check_cmd python3 "Install Python 3.11+: https://python.org"
 
 # Python version check
 PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
 PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ) ]]; then
+[[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ) ]] && \
   die "Python 3.11+ required, found ${PY_VER}"
-fi
 
-# Podman rootless check
-if ! podman info 2>/dev/null | grep -q 'rootless: true' && \
-   ! podman info 2>/dev/null | grep -q 'rootlessCompute: true'; then
-  # On macOS with podman machine, rootless is implicit
-  if [[ "$(uname)" == "Darwin" ]]; then
-    # Check if podman machine is running
-    if ! podman machine inspect &>/dev/null 2>&1 || \
-       ! podman machine list 2>/dev/null | grep -q 'Currently running'; then
-      warn "Podman machine is not running — starting it now ..."
-      if ! podman machine inspect &>/dev/null 2>&1; then
-        step "Initialising Podman machine (first time, ~2min) ..."
-        podman machine init
-      fi
-      podman machine start
-      ok "Podman machine started"
+check_cmd podman "Install Podman: https://podman.io/getting-started/installation"
+
+# macOS: ensure podman machine is running
+if [[ "$(uname)" == "Darwin" ]]; then
+  if ! podman machine list 2>/dev/null | grep -q 'Currently running'; then
+    warn "Podman machine is not running — starting it now ..."
+    if ! podman machine inspect &>/dev/null 2>&1; then
+      step "Initialising Podman machine (first time, ~2 min) ..."
+      podman machine init
     fi
-  else
-    warn "Podman rootless check inconclusive — continuing. Run: podman info | grep rootless"
+    podman machine start
+    ok "Podman machine started"
   fi
 fi
 
-if [[ "$MODE" == "cloud" ]]; then
-  check_cmd aws       "Install AWS CLI v2: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
-  check_cmd terraform "Install Terraform: https://developer.hashicorp.com/terraform/install"
-  check_cmd jq        "Install jq: https://jqlang.github.io/jq/download/"
-fi
+[[ "$MODE" == "cloud" ]] && \
+  check_cmd aws "Install AWS CLI v2: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
 
 ok "Prerequisites OK (Python ${PY_VER}, Podman $(podman --version | awk '{print $3}'))"
 
 # ---------------------------------------------------------------------------
-# Step 2: Install sandboxshift Python package
+# Step 2: Create sandboxshift home directories
 # ---------------------------------------------------------------------------
-step "Installing sandboxshift (pip install -e .) ..."
-pip install -e . --quiet
-ok "sandboxshift installed — $(sandboxshift --help | head -1)"
+mkdir -p "$BIN_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 3: Build runtime images into Podman local store
+# Step 3: Download pinned Terraform (always use our own, never system terraform)
+# ---------------------------------------------------------------------------
+_download_terraform() {
+  # Check if our pinned version is already present
+  if [[ -x "$TF_BIN" ]]; then
+    local existing_ver
+    existing_ver=$("$TF_BIN" version -json 2>/dev/null | \
+      python3 -c "import json,sys; print(json.load(sys.stdin).get('terraform_version','unknown'))" \
+      2>/dev/null || echo "unknown")
+    if [[ "$existing_ver" == "$TF_VERSION" ]]; then
+      ok "Terraform ${TF_VERSION} already present (${TF_BIN})"
+      return 0
+    fi
+    step "Replacing cached Terraform ${existing_ver} with pinned ${TF_VERSION} ..."
+  else
+    step "Downloading Terraform ${TF_VERSION} (managed by sandboxshift) ..."
+  fi
+
+  # Detect platform
+  local os arch
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64)        arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) die "Unsupported architecture: ${arch}" ;;
+  esac
+
+  local tf_url="https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_${os}_${arch}.zip"
+  local tf_zip="${BIN_DIR}/terraform_${TF_VERSION}.zip"
+
+  step "  Fetching ${tf_url} ..."
+  python3 - "$tf_url" "$tf_zip" <<'PYEOF'
+import urllib.request, sys, os
+url, dest = sys.argv[1], sys.argv[2]
+def progress(count, block, total):
+    pct = min(int(count * block * 100 / total), 100) if total > 0 else 0
+    print(f"  ... {pct}%", end="\r", flush=True)
+urllib.request.urlretrieve(url, dest, reporthook=progress)
+print()
+PYEOF
+
+  step "  Extracting ..."
+  python3 - "$tf_zip" "$BIN_DIR" <<'PYEOF'
+import zipfile, sys
+with zipfile.ZipFile(sys.argv[1]) as z:
+    z.extract("terraform", sys.argv[2])
+PYEOF
+
+  chmod +x "$TF_BIN"
+  rm -f "$tf_zip"
+  ok "Terraform ${TF_VERSION} installed at ${TF_BIN}"
+}
+
+_download_terraform
+
+# ---------------------------------------------------------------------------
+# Step 4: Create isolated Python venv + install sandboxshift
+# ---------------------------------------------------------------------------
+step "Setting up isolated Python environment at ${VENV_DIR} ..."
+
+# Create or re-use venv
+if [[ ! -f "${VENV_DIR}/bin/python3" ]]; then
+  python3 -m venv "$VENV_DIR"
+  ok "Venv created at ${VENV_DIR}"
+else
+  ok "Venv already exists at ${VENV_DIR}"
+fi
+
+step "Installing sandboxshift into venv ..."
+"$VENV_DIR/bin/pip" install -e . --quiet
+ok "sandboxshift installed in isolated venv"
+
+# Symlink CLI into BIN_DIR so ~/.sandboxshift/bin/sandboxshift works
+ln -sf "$VENV_DIR/bin/sandboxshift" "$BIN_DIR/sandboxshift"
+ok "CLI symlinked: ${BIN_DIR}/sandboxshift"
+
+# PATH hint — print if not already on PATH
+if ! echo ":${PATH}:" | grep -q ":${BIN_DIR}:"; then
+  echo
+  warn "Add ~/.sandboxshift/bin to your PATH to use the CLI from anywhere:"
+  echo -e "  ${BOLD}echo 'export PATH=\"\$HOME/.sandboxshift/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc${RESET}"
+  echo -e "  ${BOLD}# or for bash: >> ~/.bashrc${RESET}"
+fi
+
+# Use our venv sandboxshift for the rest of the script
+SANDBOXSHIFT_CMD="$VENV_DIR/bin/sandboxshift"
+
+# ---------------------------------------------------------------------------
+# Step 5: Build runtime images into Podman local store
 # ---------------------------------------------------------------------------
 step "Building runtime images into Podman local store ..."
 echo
@@ -143,11 +217,11 @@ BUILD_FAILED=0
 
 build_image() {
   local tag="$1" context="$2"
-  step "  Building ${tag} from ${context} ..."
-  if podman build -t "$tag" "$context" --quiet; then
+  step "  Building ${tag} ..."
+  if podman build -t "$tag" "$context" --quiet 2>&1 | sed 's/^/    /'; then
     ok "  ${tag}"
   else
-    warn "  Failed to build ${tag} — continuing (non-fatal for local use if not needed)"
+    warn "  Failed to build ${tag} (non-fatal — continuing)"
     BUILD_FAILED=1
   fi
 }
@@ -163,12 +237,17 @@ else
   ok "All runtime images built"
 fi
 
-# Short-circuit if local-only
+# Short-circuit for local mode
 if [[ "$MODE" == "local" ]]; then
+  _print_local_success
+  exit 0
+fi
+
+_print_local_success() {
   echo
-  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+  echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
   echo -e "${GREEN}${BOLD}  SandboxShift is ready for local use!${RESET}"
-  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+  echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
   echo
   echo -e "  Try it:"
   echo -e "    mkdir -p /tmp/ss-test"
@@ -178,26 +257,29 @@ if [[ "$MODE" == "local" ]]; then
   echo -e "  To enable cloud burst later:"
   echo -e "    ${BOLD}./sandboxshift-setup.sh cloud${RESET}"
   echo
+}
+
+if [[ "$MODE" == "local" ]]; then
+  _print_local_success
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4: Verify AWS credentials
+# Step 6: Verify AWS credentials
 # ---------------------------------------------------------------------------
 step "Verifying AWS credentials ..."
-if ! IDENTITY=$(aws sts get-caller-identity 2>&1); then
-  die "AWS credentials not configured or invalid.\n  Run: aws configure\n  Or set: AWS_PROFILE / AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
-fi
-ACCOUNT_ID=$(echo "$IDENTITY" | jq -r '.Account')
+IDENTITY_JSON=$(aws sts get-caller-identity 2>&1) || \
+  die "AWS credentials not configured.\n  Run: aws configure  (or set AWS_PROFILE)"
+
+ACCOUNT_ID=$(echo "$IDENTITY_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['Account'])")
 ok "AWS account: ${ACCOUNT_ID}"
 
 # ---------------------------------------------------------------------------
-# Step 5: Resolve region
+# Step 7: Resolve region
 # ---------------------------------------------------------------------------
 AWS_REGION_RESOLVED="${AWS_DEFAULT_REGION:-${AWS_REGION:-}}"
-if [[ -z "$AWS_REGION_RESOLVED" ]]; then
+[[ -z "$AWS_REGION_RESOLVED" ]] && \
   AWS_REGION_RESOLVED=$(aws configure get region 2>/dev/null || true)
-fi
 if [[ -z "$AWS_REGION_RESOLVED" ]]; then
   echo
   echo -n -e "${BLUE}[sandboxshift-setup]${RESET} AWS region (e.g. us-east-1): "
@@ -207,7 +289,7 @@ fi
 ok "Region: ${AWS_REGION_RESOLVED}"
 
 # ---------------------------------------------------------------------------
-# Step 6: Create ECR repository if missing
+# Step 8: Create ECR repository if missing
 # ---------------------------------------------------------------------------
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION_RESOLVED}.amazonaws.com"
 ECR_REPO="sandboxshift/runtime-multi"
@@ -229,7 +311,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7: Podman login to ECR
+# Step 9: Podman login to ECR
 # ---------------------------------------------------------------------------
 step "Logging Podman in to ECR ..."
 aws ecr get-login-password --region "$AWS_REGION_RESOLVED" | \
@@ -237,17 +319,17 @@ aws ecr get-login-password --region "$AWS_REGION_RESOLVED" | \
 ok "Podman logged in to ${ECR_REGISTRY}"
 
 # ---------------------------------------------------------------------------
-# Step 8: Tag and push runtime-multi to ECR
+# Step 10: Tag and push runtime-multi to ECR
 # ---------------------------------------------------------------------------
 step "Tagging sandboxshift/runtime-multi:latest → ${ECR_IMAGE_URI} ..."
 podman tag "sandboxshift/runtime-multi:latest" "$ECR_IMAGE_URI"
 
-step "Pushing to ECR (this may take ~1-2 min on first push) ..."
+step "Pushing to ECR (~1-2 min on first push) ..."
 podman push "$ECR_IMAGE_URI"
 ok "Image pushed: ${ECR_IMAGE_URI}"
 
 # ---------------------------------------------------------------------------
-# Step 9: Write terraform.tfvars
+# Step 11: Write terraform.tfvars
 # ---------------------------------------------------------------------------
 TF_DIR="$SCRIPT_DIR/terraform/fargate"
 TF_VARS_FILE="$TF_DIR/terraform.tfvars"
@@ -260,53 +342,56 @@ EOF
 ok "terraform.tfvars written"
 
 # ---------------------------------------------------------------------------
-# Step 10: terraform init + apply
+# Step 12: terraform init + apply  (using OUR pinned terraform binary)
 # ---------------------------------------------------------------------------
 step "Running terraform init ..."
-(cd "$TF_DIR" && terraform init -upgrade -input=false -no-color 2>&1 | \
+(cd "$TF_DIR" && "$TF_BIN" init -upgrade -input=false -no-color 2>&1 | \
   grep -v '^$' | sed 's/^/  /')
 ok "terraform init complete"
 
-step "Running terraform apply (this provisions AWS resources ~1-2 min) ..."
-(cd "$TF_DIR" && terraform apply -auto-approve -input=false -no-color 2>&1 | \
+step "Running terraform apply (provisions AWS resources ~1-2 min) ..."
+(cd "$TF_DIR" && "$TF_BIN" apply -auto-approve -input=false -no-color 2>&1 | \
   grep -v '^$' | sed 's/^/  /')
 ok "terraform apply complete"
 
 # ---------------------------------------------------------------------------
-# Step 11: Collect terraform outputs → ~/.sandboxshift/fargate.env
+# Step 13: Read terraform outputs → ~/.sandboxshift/fargate.env
+#          All JSON parsing done with Python — no jq needed.
 # ---------------------------------------------------------------------------
-ENV_DIR="$HOME/.sandboxshift"
-ENV_FILE="$ENV_DIR/fargate.env"
-mkdir -p "$ENV_DIR"
-
 step "Reading terraform outputs ..."
-TF_OUTPUTS=$(cd "$TF_DIR" && terraform output -json)
+TF_OUTPUTS=$((cd "$TF_DIR" && "$TF_BIN" output -json) 2>/dev/null)
 
-extract() { echo "$TF_OUTPUTS" | jq -r ".${1}.value // empty"; }
-extract_json_csv() { echo "$TF_OUTPUTS" | jq -r ".${1}.value | join(\",\")"; }
+extract() {
+  python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get(sys.argv[2],{}).get('value',''))" \
+    "$TF_OUTPUTS" "$1"
+}
+extract_csv() {
+  python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(','.join(d.get(sys.argv[2],{}).get('value',[])))" \
+    "$TF_OUTPUTS" "$1"
+}
 
 CLUSTER_ARN=$(extract cluster_arn)
 TASK_DEF_ARN=$(extract task_def_arn)
-SUBNET_IDS=$(extract_json_csv subnet_ids)
-SECURITY_GROUP_IDS=$(extract_json_csv security_group_ids)
+SUBNET_IDS=$(extract_csv subnet_ids)
+SECURITY_GROUP_IDS=$(extract_csv security_group_ids)
 LOG_GROUP=$(extract log_group)
 REGION=$(extract region)
 WORKSPACE_BUCKET=$(extract workspace_bucket_name)
 SERVER_SG_ID=$(extract server_security_group_id)
 
-[[ -z "$CLUSTER_ARN" ]]        && die "Could not read cluster_arn from terraform output"
-[[ -z "$TASK_DEF_ARN" ]]       && die "Could not read task_def_arn from terraform output"
-[[ -z "$SUBNET_IDS" ]]         && die "Could not read subnet_ids from terraform output"
-[[ -z "$SECURITY_GROUP_IDS" ]] && die "Could not read security_group_ids from terraform output"
-[[ -z "$LOG_GROUP" ]]          && die "Could not read log_group from terraform output"
-[[ -z "$REGION" ]]             && die "Could not read region from terraform output"
-[[ -z "$WORKSPACE_BUCKET" ]]   && die "Could not read workspace_bucket_name from terraform output"
+[[ -z "$CLUSTER_ARN" ]]        && die "Could not read cluster_arn"
+[[ -z "$TASK_DEF_ARN" ]]       && die "Could not read task_def_arn"
+[[ -z "$SUBNET_IDS" ]]         && die "Could not read subnet_ids"
+[[ -z "$SECURITY_GROUP_IDS" ]] && die "Could not read security_group_ids"
+[[ -z "$LOG_GROUP" ]]          && die "Could not read log_group"
+[[ -z "$REGION" ]]             && die "Could not read region"
+[[ -z "$WORKSPACE_BUCKET" ]]   && die "Could not read workspace_bucket_name"
 
-step "Writing ${ENV_FILE} ..."
-cat > "$ENV_FILE" <<EOF
+step "Writing ${SANDBOXSHIFT_HOME}/fargate.env ..."
+cat > "$SANDBOXSHIFT_HOME/fargate.env" <<EOF
 # Auto-generated by sandboxshift-setup.sh — do not edit manually.
 # Re-run ./sandboxshift-setup.sh cloud to regenerate after infrastructure changes.
-# This file is auto-loaded by the sandboxshift CLI — no manual export needed.
+# Auto-loaded by the sandboxshift CLI on every invocation — no manual source needed.
 
 export FARGATE_CLUSTER_ARN="${CLUSTER_ARN}"
 export FARGATE_TASK_DEFINITION_ARN="${TASK_DEF_ARN}"
@@ -317,30 +402,29 @@ export FARGATE_REGION="${REGION}"
 export FARGATE_WORKSPACE_BUCKET="${WORKSPACE_BUCKET}"
 export FARGATE_SERVER_SECURITY_GROUP_ID="${SERVER_SG_ID}"
 EOF
-ok "fargate.env written to ${ENV_FILE}"
-ok "(auto-loaded by sandboxshift CLI — no manual export needed)"
+ok "fargate.env written"
+ok "(auto-loaded by sandboxshift CLI — no manual source/export needed)"
 
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 echo
-echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
 echo -e "${GREEN}${BOLD}  SandboxShift cloud burst is ready!${RESET}"
-echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
 echo
-echo -e "  ECR image:      ${BOLD}${ECR_IMAGE_URI}${RESET}"
-echo -e "  S3 bucket:      ${BOLD}${WORKSPACE_BUCKET}${RESET}"
-echo -e "  Region:         ${BOLD}${REGION}${RESET}"
+echo -e "  ECR image:  ${BOLD}${ECR_IMAGE_URI}${RESET}"
+echo -e "  S3 bucket:  ${BOLD}${WORKSPACE_BUCKET}${RESET}"
+echo -e "  Region:     ${BOLD}${REGION}${RESET}"
 echo
-echo -e "  Test it (local — uses Podman):"
-echo -e "    mkdir -p /tmp/ss-test"
-echo -e "    echo 'print(\"hello from sandbox\")' > /tmp/ss-test/hello.py"
+echo -e "  Test local:"
+echo -e "    mkdir -p /tmp/ss-test && echo 'print(\"hello\")' > /tmp/ss-test/hello.py"
 echo -e "    ${BOLD}sandboxshift run /tmp/ss-test \"python hello.py\"${RESET}"
 echo
-echo -e "  Test it (cloud burst — forces Fargate):"
+echo -e "  Test cloud burst:"
 echo -e "    ${BOLD}sandboxshift run /tmp/ss-test \"python hello.py\" --ram-threshold 999999${RESET}"
 echo
 echo -e "  Run a Node.js server in the cloud:"
-echo -e "    ${BOLD}sandboxshift run /your/node-project \"node index.js\" --port 3000 --ram-threshold 999999${RESET}"
+echo -e "    ${BOLD}sandboxshift run /your/node-app \"node index.js\" --port 3000 --ram-threshold 999999${RESET}"
 echo -e "    ${BOLD}sandboxshift stop <instance_id>${RESET}  # when done"
 echo

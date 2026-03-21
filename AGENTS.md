@@ -161,7 +161,7 @@ Layer 7: Audit trail               → Full record of all agent actions
 ## Target Users
 
 ```
-V1: Individual DevOps/platform engineer (primary — build for this person first)
+V1: Individual developer (primary — build for this person first)
 V2: Small teams and startups
 V3: Enterprises in regulated industries (banks, hospitals, defense)
     → K8s mode, compliance logs, FIPS, air-gapped deployment
@@ -175,6 +175,7 @@ V3: Enterprises in regulated industries (banks, hospitals, defense)
 sandboxshift/
 ├── AGENTS.md                    ← this file (shared agent brain)
 ├── README.md                    ← user-facing docs ✓ BUILT
+├── sandboxshift-setup.sh        ← one-script setup ✓ BUILT
 ├── pyproject.toml               ← project metadata + dev dependencies
 ├── sandboxshift.yaml            ← example config
 ├── .github/
@@ -285,6 +286,7 @@ sandboxshift/
 - [x] Pre-built runtime images (python, node, multi) — **COMPLETE** (2026-03-14)
 - [x] Terraform for AWS setup — **COMPLETE** (2026-03-14)
 - [x] README and getting started docs — **COMPLETE** (2026-03-14)
+- [x] One-script setup (sandboxshift-setup.sh) — **COMPLETE** (2026-03-21)
 
 ### **V1 IS COMPLETE.**
 
@@ -295,6 +297,7 @@ sandboxshift/
 - [ ] MCP server (plug into Claude Desktop, Cursor)
 - [ ] Grafana dashboard
 - [ ] Java + Go + Rust runtimes
+- [ ] Homebrew tap distribution
 
 ### Phase 3 — V3
 - [ ] Kubernetes mode (Helm chart)
@@ -371,6 +374,8 @@ sandboxshift/
 | 56 | PORT env var auto-injection | When `config.ports` is non-empty, inject `PORT=<container_port>` into container env (Podman via `--env PORT=N`; Fargate via `containerOverrides.environment`); uses first configured container port | Apps read `process.env.PORT` (Node) or `$PORT` (shell) without hardcoding the port number; consistent between local and cloud runtimes | 2026-03-20 |
 | 57 | Bare `--port N` CLI shorthand | `_parse_port()` accepts bare integer N and expands to `(N, N)` (host=N, container=N); `HOST:CONTAINER` form still accepted | Removes need to type `--port 3000:3000`; bare number is the common case; HOST:CONTAINER retained for port remapping | 2026-03-20 |
 | 58 | S3 upload skip dirs | `_SKIP_DIRS` frozenset in `fargate.py`; `node_modules`, `__pycache__`, `.venv`, `venv`, `env`, `.pytest_cache`, `.tox`, `.eggs`, `dist`, `build`, `.next`, `.nuxt` never uploaded; deps reinstalled in ECS by `_S3_DEPS_BOOTSTRAP`; 500MB cap re-checked against filtered set | node_modules alone can be 6000+ files / hundreds of MB; uploading them wastes S3 bandwidth and time; they are platform-specific (Linux container ≠ macOS host) anyway so uploading would break native addons | 2026-03-21 |
+| 59 | Terraform distribution in setup script | Always download pinned Terraform 1.5.7 to `~/.sandboxshift/bin/terraform` using Python `urllib` + `zipfile` (no curl, no unzip, no system Terraform required); version cached — skipped if already correct; all `terraform` invocations in setup script use `$TF_BIN` | Eliminates version mismatch bugs entirely; Python is the only binary dependency needed to bootstrap the download; consistent behaviour regardless of whether user has Terraform installed | 2026-03-21 |
+| 60 | Python venv isolation in setup script | Create isolated venv at `~/.sandboxshift/venv/`; install sandboxshift into it; symlink CLI to `~/.sandboxshift/bin/sandboxshift`; user adds `~/.sandboxshift/bin` to PATH once | Keeps user's global Python env clean; single PATH entry exposes both `sandboxshift` CLI and `terraform` binary; works for all developers not just DevOps | 2026-03-21 |
 
 ---
 

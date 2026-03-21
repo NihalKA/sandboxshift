@@ -2,20 +2,21 @@
 
 This guide walks you through: install → first local run → reading audit logs → cloud burst setup.
 
-**Target audience:** Individual DevOps / platform engineer on macOS or Linux.
+**Target audience:** Any developer on macOS or Linux.
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version | Check |
-|-------------|---------|-------|
-| Python | 3.11+ | `python3 --version` |
-| Podman (rootless) | any | `podman info \| grep rootless` → `true` |
-| Git | any | `git --version` |
-| AWS CLI | v2 | Only for cloud burst mode |
-| Terraform | 1.5+ | Only for cloud burst mode |
-| jq | any | Only for cloud burst mode |
+You install these. Everything else is managed by the setup script.
+
+| Requirement | For | Install |
+|-------------|-----|---------|
+| Python 3.11+ | always | [python.org](https://python.org) |
+| Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
+| AWS CLI v2 | cloud burst only | `brew install awscli` / [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
+
+**Not required to install:** Terraform, jq — the setup script downloads and manages these for you.
 
 ### Install Podman
 
@@ -40,9 +41,10 @@ podman run --rm hello-world
 ```bash
 git clone https://github.com/NihalKA/sandboxshift
 cd sandboxshift
+chmod +x sandboxshift-setup.sh
 ```
 
-Then run the setup script for your use case:
+Then run the setup script for your use case.
 
 ### Local mode only (no AWS needed)
 
@@ -51,9 +53,11 @@ Then run the setup script for your use case:
 ```
 
 This:
-1. Runs `pip install -e .`
-2. Builds all 3 runtime images into Podman (`runtime-python`, `runtime-node`, `runtime-multi`)
-3. Prints a ready-to-use test command
+1. Downloads **Terraform 1.5.7** to `~/.sandboxshift/bin/` (pinned, never touches your system Terraform)
+2. Creates an **isolated Python venv** at `~/.sandboxshift/venv/` (your global env stays clean)
+3. Installs sandboxshift into that venv
+4. Symlinks the CLI to `~/.sandboxshift/bin/sandboxshift`
+5. Builds all 3 runtime images into Podman (`runtime-python`, `runtime-node`, `runtime-multi`)
 
 ### Cloud burst mode (local + AWS Fargate)
 
@@ -61,13 +65,26 @@ This:
 ./sandboxshift-setup.sh cloud
 ```
 
-This does everything above, plus:
-4. Creates an ECR repository in your AWS account and pushes `runtime-multi`
-5. Runs `terraform apply` to provision ECS cluster, S3 bucket, IAM roles, and security groups
-6. Writes `~/.sandboxshift/fargate.env` with all connection variables
-7. The CLI auto-loads `fargate.env` on every run — **no manual `export` needed**
+Everything above, plus:
+6. Creates an ECR repository in your AWS account and pushes `runtime-multi`
+7. Runs `terraform apply` to provision ECS cluster, S3 bucket, IAM roles, and security groups
+8. Writes `~/.sandboxshift/fargate.env` with all connection variables
+9. The CLI **auto-loads `fargate.env`** on every run — no manual `source` or `export` needed
 
-> **Auto-detect:** `./sandboxshift-setup.sh` (no argument) auto-selects cloud if `aws sts get-caller-identity` succeeds, otherwise local.
+> **Auto-detect:** `./sandboxshift-setup.sh` (no argument) runs cloud if `aws sts get-caller-identity` succeeds, otherwise local.
+
+### Add CLI to your PATH
+
+```bash
+echo 'export PATH="$HOME/.sandboxshift/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+# or for bash:
+echo 'export PATH="$HOME/.sandboxshift/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+Verify:
+```bash
+sandboxshift --help
+```
 
 ---
 
@@ -132,11 +149,9 @@ Every run appends structured JSON events to `~/.sandboxshift/audit.log`:
 ```bash
 sandboxshift audit tail
 sandboxshift audit tail --lines 50
-```
 
-Or read raw:
-```bash
-cat ~/.sandboxshift/audit.log | jq .
+# Raw JSON
+cat ~/.sandboxshift/audit.log | python3 -m json.tool
 ```
 
 Events you'll see for each run:
@@ -176,8 +191,7 @@ Even if RAM is tight — sensitive workspaces are always forced local. The sensi
 ### Prerequisites
 
 - AWS CLI configured: `aws configure`
-- Terraform 1.5+: `brew install terraform` / `apt install terraform`
-- jq: `brew install jq` / `apt install jq`
+- That's it — Terraform is downloaded automatically by the setup script
 
 ### Run the setup script
 
@@ -186,8 +200,8 @@ Even if RAM is tight — sensitive workspaces are always forced local. The sensi
 ```
 
 The script will:
-1. Verify AWS credentials
-2. Detect your account ID and region (prompts if region not set)
+1. Download Terraform 1.5.7 to `~/.sandboxshift/bin/` (skipped if already cached at correct version)
+2. Verify AWS credentials and detect your account ID and region (prompts if not set)
 3. Create ECR repository `sandboxshift/runtime-multi` (if not exists)
 4. Login Podman to ECR and push the image (~1-2 min on first push)
 5. Run `terraform apply` in `terraform/fargate/` (~1-2 min)
@@ -218,12 +232,12 @@ The script will:
 | `FARGATE_WORKSPACE_BUCKET` | ✓ | `terraform output workspace_bucket_name` |
 | `FARGATE_SERVER_SECURITY_GROUP_ID` | optional | `terraform output server_security_group_id` |
 
-The CLI reads this file automatically on every invocation via `_load_fargate_env()`. You never need to `source` or `export` anything manually.
+The CLI reads this file automatically on every invocation. You never need to `source` or `export` anything.
 
 ### Test cloud burst
 
 ```bash
-# Force cloud (override RAM threshold so it always bursts)
+# Force cloud by setting RAM threshold impossibly high
 sandboxshift run /tmp/test-workspace "python hello.py" --ram-threshold 999999
 ```
 
@@ -259,7 +273,10 @@ sandboxshift stop ss-abc123...
 
 ## Updating after infrastructure changes
 
-If you re-run `./sandboxshift-setup.sh cloud`, Terraform will update the infrastructure and the script will overwrite `~/.sandboxshift/fargate.env` with the latest task definition ARN and other outputs. The CLI always reads the latest values.
+Re-running `./sandboxshift-setup.sh cloud` is idempotent:
+- Terraform is skipped if already cached at the correct version
+- `terraform apply` is a no-op if nothing changed
+- `fargate.env` is overwritten with the latest outputs
 
 ---
 
@@ -268,9 +285,10 @@ If you re-run `./sandboxshift-setup.sh cloud`, Terraform will update the infrast
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `podman: command not found` | Podman not installed | See Install Podman above |
-| `Error: rootless mode requires...` | Podman not configured rootlessly | `podman machine init && podman machine start` (macOS) |
-| `node: not found` inside container | Wrong runtime image — old task def revision | Re-run `./sandboxshift-setup.sh cloud` to update task def to `runtime-multi` |
-| Cloud tasks always go local | Not all 7 `FARGATE_*` vars in `~/.sandboxshift/fargate.env` | Re-run `./sandboxshift-setup.sh cloud` |
-| `No module named uvicorn` in ECS | `_S3_DEPS_BOOTSTRAP` needs `requirements.txt` in workspace | Add `requirements.txt` with `uvicorn` and `fastapi` |
-| `exit_code: 1` but task ran | Task failed inside the sandbox | Check stderr output — non-zero exit is a task result, not an API error |
-| Terraform state conflict on re-apply | Old state references deleted resources | `cd terraform/fargate && terraform refresh` then re-run setup |
+| `Error: rootless mode requires...` | Podman not rootless | `podman machine init && podman machine start` (macOS) |
+| `node: not found` inside container | Old task def uses python-only image | Re-run `./sandboxshift-setup.sh cloud` |
+| Cloud tasks always go local | `fargate.env` missing or incomplete | Re-run `./sandboxshift-setup.sh cloud` |
+| `sandboxshift: command not found` | `~/.sandboxshift/bin` not in PATH | Add to shell profile — see PATH step above |
+| `No module named uvicorn` in ECS | `requirements.txt` missing uvicorn | Add `uvicorn` + `fastapi` to your `requirements.txt` |
+| `exit_code: 1` but task ran | Task failed inside sandbox | Check stderr — non-zero exit is a task result, not an API error |
+| Terraform state conflict on re-apply | Old state references deleted resources | `cd terraform/fargate && ~/.sandboxshift/bin/terraform refresh` then re-run setup |
