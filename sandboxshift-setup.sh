@@ -6,10 +6,11 @@
 #   2.  Creates an S3 bucket for Terraform remote state
 #   3.  Creates a DynamoDB table for Terraform state locking
 #   4.  Creates ECR repositories for all three runtime images
-#   5.  Builds and pushes runtime images to ECR (python, node, multi)
-#   6.  Patches terraform/fargate/backend.tf
-#   7.  Runs terraform init + terraform apply (wires ECR image into task definition)
-#   8.  Writes all FARGATE_* env vars to ~/.sandboxshift/fargate.env
+#   5.  Logs in to Chainguard registry (cgr.dev) for base image pulls
+#   6.  Builds and pushes runtime images to ECR (python, node, multi)
+#   7.  Patches terraform/fargate/backend.tf
+#   8.  Runs terraform init + terraform apply (wires ECR image into task definition)
+#   9.  Writes all FARGATE_* env vars to ~/.sandboxshift/fargate.env
 #       (auto-loaded by the CLI — no manual source needed)
 #
 # Usage:
@@ -26,6 +27,7 @@
 #   - podman  (brew install podman)
 #   - skopeo  (brew install skopeo)  — used for reliable cross-platform image push
 #   - jq      (brew install jq)
+#   - A free Chainguard account (https://cgr.dev) — required to pull base images
 
 set -euo pipefail
 
@@ -291,7 +293,36 @@ ok "ECR credentials stored (used by both podman and skopeo)."
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 5: Build and push runtime images
+# Step 5: Chainguard registry login
+#
+# Chainguard requires authentication even for free public images (since 2024).
+# Without login, podman pull returns "manifest unknown" instead of 401.
+#
+# Sign up free at https://cgr.dev (takes ~30 seconds, no credit card).
+# Then run: podman login cgr.dev
+# Credentials are cached in ~/.config/containers/auth.json and reused on
+# subsequent runs — you only need to do this once per machine.
+# ───────────────────────────────────────────────────────────────────────────────
+
+# Check if already logged in to cgr.dev by looking for a cached credential.
+# ~/.config/containers/auth.json stores credentials keyed by registry hostname.
+if grep -q '"cgr.dev"' "${HOME}/.config/containers/auth.json" 2>/dev/null; then
+  ok "Already logged in to cgr.dev (cached credentials found)."
+else
+  echo ""
+  echo -e "${YELLOW}  Chainguard registry login required${NC}"
+  echo "  Chainguard requires authentication to pull base images (free account)."
+  echo "  Sign up at: https://cgr.dev  (30 seconds, no credit card)"
+  echo ""
+  info "Logging in to cgr.dev ..."
+  podman login cgr.dev \
+    || error "Chainguard login failed. Create a free account at https://cgr.dev then re-run."
+  ok "Logged in to cgr.dev."
+fi
+echo ""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Step 6: Build and push runtime images
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Building and pushing runtime images (linux/amd64 — this may take a few minutes)..."
@@ -315,7 +346,7 @@ build_and_push \
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 6: Patch backend.tf
+# Step 7: Patch backend.tf
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Patching terraform/fargate/backend.tf..."
@@ -335,7 +366,7 @@ EOF
 ok "backend.tf patched."
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 7: terraform init + apply
+# Step 8: terraform init + apply
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Running terraform init..."
@@ -358,7 +389,7 @@ ok "terraform apply complete."
 echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Step 8: Read outputs and write fargate.env
+# Step 9: Read outputs and write fargate.env
 # ───────────────────────────────────────────────────────────────────────────────
 
 info "Reading terraform outputs..."
