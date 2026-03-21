@@ -267,10 +267,8 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
 
     fargate_runtime = _build_fargate_runtime(audit_logger)
     podman_runtime = PodmanRuntime(audit_logger=audit_logger)
-    burst_engine = BurstEngine(
-        ram_threshold_mb=args.ram_threshold,
-        cpu_threshold=args.cpu_threshold if hasattr(args, "cpu_threshold") else 0,
-    )
+    # --ram-threshold is in MB; BurstEngine expects GB — divide by 1024.
+    burst_engine = BurstEngine(ram_threshold_gb=args.ram_threshold / 1024)
 
     manager = SandboxManager(
         local_runtime=podman_runtime,
