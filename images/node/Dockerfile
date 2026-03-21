@@ -21,10 +21,11 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-node" \
 WORKDIR /workspace
 
 # Install python3 + pip for boto3 S3 workspace download bootstrap.
-# boto3 is needed in Fargate mode to pull workspace files from S3.
+# --break-system-packages is required on Debian bookworm (PEP 668) when
+# installing pip packages system-wide inside a container.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-pip \
- && pip3 install --no-cache-dir boto3 \
+ && pip3 install --no-cache-dir --break-system-packages boto3 \
  && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for runtime execution.
