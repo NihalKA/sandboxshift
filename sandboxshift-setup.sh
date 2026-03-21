@@ -366,12 +366,13 @@ echo ""
 info "Reading terraform outputs..."
 TF_OUTPUTS=$(terraform output -json)
 
-CLUSTER_ARN=$(echo "${TF_OUTPUTS}"      | jq -r '.cluster_arn.value')
-TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"     | jq -r '.task_def_arn.value')
-LOG_GROUP=$(echo "${TF_OUTPUTS}"        | jq -r '.log_group.value')
-SUBNET_IDS_CSV=$(echo "${TF_OUTPUTS}"   | jq -r '.subnet_ids.value | join(",")')
-SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"    | jq -r '.security_group_ids.value | join(",")')
-WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}" | jq -r '.workspace_bucket_name.value')
+CLUSTER_ARN=$(echo "${TF_OUTPUTS}"          | jq -r '.cluster_arn.value')
+TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"         | jq -r '.task_def_arn.value')
+LOG_GROUP=$(echo "${TF_OUTPUTS}"            | jq -r '.log_group.value')
+SUBNET_IDS_CSV=$(echo "${TF_OUTPUTS}"       | jq -r '.subnet_ids.value | join(",")')
+SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"        | jq -r '.security_group_ids.value | join(",")')
+SERVER_SG_ID=$(echo "${TF_OUTPUTS}"         | jq -r '.server_security_group_id.value')
+WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}"     | jq -r '.workspace_bucket_name.value')
 
 FARGATE_ENV="${HOME}/.sandboxshift/fargate.env"
 cat > "${FARGATE_ENV}" <<EOF
@@ -381,6 +382,7 @@ export FARGATE_CLUSTER_ARN="${CLUSTER_ARN}"
 export FARGATE_TASK_DEFINITION_ARN="${TASK_DEF_ARN}"
 export FARGATE_SUBNET_IDS="${SUBNET_IDS_CSV}"
 export FARGATE_SECURITY_GROUP_IDS="${SEC_GROUP_IDS}"
+export FARGATE_SERVER_SECURITY_GROUP_ID="${SERVER_SG_ID}"
 export FARGATE_LOG_GROUP="${LOG_GROUP}"
 export FARGATE_REGION="${REGION}"
 export FARGATE_WORKSPACE_BUCKET="${WORKSPACE_BUCKET}"
