@@ -1,4 +1,4 @@
-"""SandboxShift CLI — sandboxshift run / sandboxshift audit tail."""
+"""SandboxShift CLI — sandboxshift run / sandboxshift audit tail / sandboxshift stop."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from ..sandbox.runtime.podman import PodmanRuntime
 
 _DEFAULT_AUDIT_LOG: Path = Path.home() / ".sandboxshift" / "audit.log"
 _FARGATE_ENV_FILE: Path = Path.home() / ".sandboxshift" / "fargate.env"
+_SERVERS_FILE: Path = Path.home() / ".sandboxshift" / "servers.json"
 
 _SENSITIVE_ROOTS: tuple[Path, ...] = (
     Path.home() / ".aws",
@@ -184,10 +185,15 @@ def _parse_port(port_str: str) -> tuple[int, int]:
 
 
 def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
-    """Build FargateRuntime from environment variables, or return None if any are missing."""
+    """Build FargateRuntime from environment variables, or return None if any required vars are missing.
+
+    FARGATE_SERVER_SECURITY_GROUP_ID is optional — if absent, server mode tasks
+    will launch without ALL-TCP inbound (ports won't be publicly reachable).
+    """
     values = {k: os.environ.get(k, "").strip() for k in _FARGATE_ENV_VARS}
     if any(v == "" for v in values.values()):
         return None
+    server_sg_id = os.environ.get("FARGATE_SERVER_SECURITY_GROUP_ID", "").strip() or None
     return FargateRuntime(
         cluster_arn=values["FARGATE_CLUSTER_ARN"],
         task_def_arn=values["FARGATE_TASK_DEFINITION_ARN"],
@@ -196,6 +202,7 @@ def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
         region=values["FARGATE_REGION"],
         log_group=values["FARGATE_LOG_GROUP"],
         workspace_bucket=values["FARGATE_WORKSPACE_BUCKET"],
+        server_security_group_id=server_sg_id,
         audit_logger=audit_logger,
     )
 
@@ -326,6 +333,72 @@ def _cmd_run(args: argparse.Namespace) -> None:
     sys.exit(result.task_result.exit_code)
 
 
+def _cmd_stop(args: argparse.Namespace) -> None:
+    """Handle 'sandboxshift stop <instance_id>' subcommand.
+
+    Stops a running cloud server task launched by FargateRuntime in server mode.
+    Reads task info from ~/.sandboxshift/servers.json, calls ECS stop_task,
+    and removes the entry from the file.
+    """
+    _load_fargate_env()
+
+    import boto3  # local import — only needed for this subcommand
+
+    if not _SERVERS_FILE.exists():
+        print("No running cloud servers found.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        servers: dict = json.loads(_SERVERS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Error reading servers file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    instance_id = args.instance_id
+
+    if instance_id not in servers:
+        print(f"No server found with instance ID: {instance_id}", file=sys.stderr)
+        if servers:
+            print("Running servers:")
+            for sid, info in servers.items():
+                ip = info.get("public_ip", "unknown")
+                ports = info.get("ports", [])
+                urls = ", ".join(f"http://{ip}:{c}" for _, c in ports) if ip else sid
+                print(f"  {sid}  {urls}")
+        sys.exit(1)
+
+    info = servers[instance_id]
+    region = info.get("region") or os.environ.get("FARGATE_REGION", "")
+    cluster_arn = info.get("cluster_arn", "")
+    ecs_task_arn = info.get("ecs_task_arn", "")
+
+    if not region or not cluster_arn or not ecs_task_arn:
+        print(
+            f"Error: incomplete server info for {instance_id} — "
+            "cannot stop task. Stop it manually via the AWS console.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        session = boto3.Session()
+        ecs = session.client("ecs", region_name=region)
+        ecs.stop_task(
+            cluster=cluster_arn,
+            task=ecs_task_arn,
+            reason="sandboxshift stop command",
+        )
+        print(f"Stopped server {instance_id}")
+
+        # Remove from servers.json
+        del servers[instance_id]
+        _SERVERS_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
+
+    except Exception as e:
+        print(f"Error stopping task: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
     """Handle 'sandboxshift audit tail' subcommand."""
     _load_fargate_env()
@@ -427,6 +500,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to audit log file (default: ~/.sandboxshift/audit.log)",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    # ── sandboxshift stop ─────────────────────────────────────────────────
+    stop_parser = subparsers.add_parser(
+        "stop",
+        help="Stop a running cloud server task",
+    )
+    stop_parser.add_argument(
+        "instance_id",
+        help="Instance ID printed by 'sandboxshift run' (e.g. ss-abc123def456)",
+    )
+    stop_parser.set_defaults(func=_cmd_stop)
 
     # ── sandboxshift audit ────────────────────────────────────────────────
     audit_parser = subparsers.add_parser("audit", help="Audit trail commands")
