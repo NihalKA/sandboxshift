@@ -28,9 +28,13 @@ RUN pip install --no-cache-dir boto3 uv
 
 # Create a non-root user for runtime execution.
 # UID 10000 is used consistently across all SandboxShift runtime images.
+# Home is /home/sandboxshift (NOT /workspace) so that pip user-installs and
+# other tools that write to ~ still work when the workspace is mounted :ro.
 # chown /workspace so the sandboxshift user can write files during S3 bootstrap.
 RUN groupadd -g 10000 sandboxshift \
- && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift \
+ && useradd -u 10000 -g 10000 -s /bin/sh -d /home/sandboxshift sandboxshift \
+ && mkdir -p /home/sandboxshift \
+ && chown 10000:10000 /home/sandboxshift \
  && chown 10000:10000 /workspace
 
 USER 10000:10000
