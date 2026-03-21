@@ -548,6 +548,10 @@ class FargateRuntime(Runtime):
 
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
+
+        PORT env var is injected when ports are configured (Decision #57) so
+        apps can read process.env.PORT (Node) or $PORT without hardcoding the
+        port number. Uses the first configured container port.
         """
         full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {_S3_DEPS_BOOTSTRAP} && {task}"
 
@@ -556,6 +560,19 @@ class FargateRuntime(Runtime):
         security_groups = list(self._security_group_ids)
         if state.is_server and self._server_security_group_id:
             security_groups.append(self._server_security_group_id)
+
+        # Build container environment — always include sandbox bootstrap vars.
+        # Inject PORT when ports are configured so apps read process.env.PORT/$PORT.
+        env_overrides = [
+            {"name": "SS_BUCKET",  "value": state.bucket_name},
+            {"name": "SS_PREFIX",  "value": state.s3_prefix},
+            {"name": "SS_REGION",  "value": state.region},
+            {"name": "SS_TASK_ID", "value": instance_id},
+        ]
+        if state.config.ports:
+            env_overrides.append(
+                {"name": "PORT", "value": str(state.config.ports[0][1])}
+            )
 
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
@@ -574,12 +591,7 @@ class FargateRuntime(Runtime):
                     {
                         "name": "sandbox",
                         "command": ["-c", full_command],
-                        "environment": [
-                            {"name": "SS_BUCKET",   "value": state.bucket_name},
-                            {"name": "SS_PREFIX",   "value": state.s3_prefix},
-                            {"name": "SS_REGION",   "value": state.region},
-                            {"name": "SS_TASK_ID",  "value": instance_id},
-                        ],
+                        "environment": env_overrides,
                     }
                 ]
             },
