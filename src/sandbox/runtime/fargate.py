@@ -7,7 +7,8 @@ Lifecycle (batch mode — no ports configured):
   provision()  →  upload workspace to the persistent S3 bucket under a
                   unique prefix (workspace/{instance_id}/), store state
   execute()    →  launch ECS Fargate task; the injected command first downloads
-                  the workspace from S3 into /workspace, then runs the user task;
+                  the workspace from S3 into /workspace, installs dependencies
+                  (pip/npm if manifest present), then runs the user task;
                   poll until STOPPED; fetch CloudWatch logs; return TaskResult
   destroy()    →  stop task, delete the workspace prefix from S3, clear state
 
@@ -15,8 +16,9 @@ Lifecycle (server mode — ports: configured in sandboxshift.yaml):
   provision()  →  same as batch
   execute()    →  launch ECS task with server SG appended; poll until RUNNING;
                   resolve ENI public IP via EC2 API; print URL to terminal;
-                  save instance info to ~/.sandboxshift/servers.json; return
-                  TaskResult immediately — task keeps running in Fargate
+                  tail CloudWatch logs live (blocks until Ctrl+C — server stays
+                  running); save instance info to ~/.sandboxshift/servers.json;
+                  return TaskResult immediately — task keeps running in Fargate
   destroy()    →  delete S3 prefix (workspace already downloaded), clear state;
                   does NOT stop the ECS task (user calls `sandboxshift stop <id>`)
 
@@ -55,6 +57,8 @@ _POLL_INTERVAL_SECONDS: float = 5.0
 _S3_DELETE_BATCH_SIZE: int = 1000
 _DEFAULT_IMAGE = "sandboxshift/runtime-python:3.11"   # audit-only in V1
 _SERVER_START_TIMEOUT_SECONDS: int = 300             # 5 min to reach RUNNING
+_LOG_STREAM_WAIT_ATTEMPTS: int = 7                   # 7 x 5s = 35s max wait
+_LOG_TAIL_POLL_SECONDS: float = 2.0                  # CloudWatch poll interval
 
 _MARKER_IMAGES: dict[str, str] = {
     "requirements.txt": "sandboxshift/runtime-python:3.11",
@@ -86,6 +90,17 @@ _S3_DOWNLOAD_BOOTSTRAP = (
     ".get_paginator('list_objects_v2').paginate(Bucket=bucket,Prefix=prefix)"
     " for o in page.get('Contents',[])"
     "]\""
+)
+
+# Shell fragment injected after workspace download — installs Python and Node
+# dependencies if manifest files are present. cd /workspace first so relative
+# imports work. Both install commands redirect stderr to stdout so all output
+# is visible in CloudWatch Logs. Failures are non-fatal (|| true) so a missing
+# npm/pip doesn't abort a task that doesn't need it.
+_S3_DEPS_BOOTSTRAP = (
+    "cd /workspace"
+    " && ([ -f requirements.txt ] && pip install --quiet -r requirements.txt 2>&1 || true)"
+    " && ([ -f package.json ] && npm install 2>&1 || true)"
 )
 
 _SERVERS_FILE: Path = Path.home() / ".sandboxshift" / "servers.json"
@@ -161,16 +176,16 @@ class FargateRuntime(Runtime):
     Runs agent tasks inside the caller's own AWS ECS Fargate cluster.
     Workspace files are staged to a persistent S3 bucket under a unique
     per-run prefix, the ECS task is launched with a bootstrap command that
-    downloads the workspace then runs the user task, CloudWatch logs are
-    fetched after completion (batch mode), and the S3 prefix is cleaned up
-    in destroy().
+    downloads the workspace, installs dependencies, then runs the user task.
+    CloudWatch logs are fetched after completion (batch mode), and the S3
+    prefix is cleaned up in destroy().
 
     Server mode (ports: configured):
     When config.ports is non-empty, execute() switches to server mode:
     the task is launched with server_security_group_id appended (ALL TCP
-    inbound), execution returns as soon as the task reaches RUNNING with
-    the public IP printed. The task keeps running — use `sandboxshift stop
-    <instance_id>` to stop it.
+    inbound), execution waits until RUNNING then tails CloudWatch logs live.
+    The tail blocks until Ctrl+C — the server keeps running. Use
+    `sandboxshift stop <instance_id>` to stop the Fargate task.
 
     Args:
         cluster_arn:              ARN of the ECS cluster to run tasks in.
@@ -319,7 +334,8 @@ class FargateRuntime(Runtime):
 
         Batch mode (no ports): waits until STOPPED, fetches logs, returns result.
         Server mode (ports configured): waits until RUNNING, resolves public IP,
-        prints URL, saves server info, returns immediately — task keeps running.
+        prints URL, tails CloudWatch logs live (blocks until Ctrl+C — server
+        stays running), then returns.
 
         Args:
             instance_id: Returned by provision().
@@ -420,11 +436,18 @@ class FargateRuntime(Runtime):
     async def _execute_server(
         self, instance_id: str, task: str, state: _FargateInstanceState
     ) -> TaskResult:
-        """Server execute: launch task, wait for RUNNING, print public IP, return.
+        """Server execute: launch task, wait for RUNNING, tail logs, return.
 
-        The ECS task is NOT waited on — it keeps running in Fargate.
-        The caller (SandboxManager) must NOT call destroy() with stop semantics
-        for server mode. FargateRuntime.destroy() skips stop for is_server=True.
+        Flow:
+          1. Launch ECS task (with server SG)
+          2. Poll until RUNNING
+          3. Resolve ENI public IP
+          4. Print URL + stop command
+          5. Tail CloudWatch logs live (blocks until Ctrl+C — server stays running)
+          6. Return TaskResult
+
+        The ECS task is NOT stopped here — it keeps running in Fargate.
+        FargateRuntime.destroy() skips the ECS stop call for is_server=True.
         """
         start_time = time.monotonic()
 
@@ -449,66 +472,56 @@ class FargateRuntime(Runtime):
             self._get_task_public_ip, ecs_task_arn, state
         )
 
+        # Duration = time to reach RUNNING (not including log tail)
         duration = time.monotonic() - start_time
 
         if public_ip:
             urls = [f"http://{public_ip}:{c}" for _, c in state.config.ports]
             url_str = "\n".join(urls)
+            stdout_result = url_str
+        else:
+            urls = []
+            url_str = f"Server running (ECS task: {task_short_id})"
+            stdout_result = url_str
 
-            print(flush=True)
-            print(
-                f"{_C_GREEN}[sandboxshift]{_C_RESET} {_C_BOLD}Server is RUNNING{_C_RESET}",
-                flush=True,
-            )
+        print(flush=True)
+        print(
+            f"{_C_GREEN}[sandboxshift]{_C_RESET} {_C_BOLD}Server is RUNNING{_C_RESET}",
+            flush=True,
+        )
+        if urls:
             for url in urls:
                 print(f"  {_C_BOLD}{_C_GREEN}{url}{_C_RESET}", flush=True)
-            print(flush=True)
-            print(f"  To stop:  sandboxshift stop {instance_id}", flush=True)
-            print(flush=True)
-
-            # Persist server info so `sandboxshift stop` can find it later
-            self._save_server_info(instance_id, ecs_task_arn, state, public_ip)
-
-            self._audit.record({
-                "event": "server_running",
-                "instance_id": instance_id,
-                "task": task,
-                "public_ip": public_ip,
-                "ports": [[h, c] for h, c in state.config.ports],
-                "ecs_task_arn": ecs_task_arn,
-                "duration_seconds": round(duration, 3),
-            })
-
-            return TaskResult(
-                exit_code=0,
-                stdout=url_str,
-                stderr="",
-                duration_seconds=duration,
-            )
         else:
-            # Could not resolve IP (rare — task just started, ENI not yet attached)
-            _ok(f"Server is RUNNING (public IP not yet available)")
             print(f"  ECS task: {task_short_id}", flush=True)
-            print(f"  To stop:  sandboxshift stop {instance_id}", flush=True)
+            _step("Public IP not yet available — check ECS console")
+        print(flush=True)
+        print(f"  To stop:  sandboxshift stop {instance_id}", flush=True)
+        print(flush=True)
 
-            self._save_server_info(instance_id, ecs_task_arn, state, None)
+        # Persist server info so `sandboxshift stop` can find it later
+        self._save_server_info(instance_id, ecs_task_arn, state, public_ip)
 
-            self._audit.record({
-                "event": "server_running",
-                "instance_id": instance_id,
-                "task": task,
-                "public_ip": None,
-                "ports": [[h, c] for h, c in state.config.ports],
-                "ecs_task_arn": ecs_task_arn,
-                "duration_seconds": round(duration, 3),
-            })
+        self._audit.record({
+            "event": "server_running",
+            "instance_id": instance_id,
+            "task": task,
+            "public_ip": public_ip,
+            "ports": [[h, c] for h, c in state.config.ports],
+            "ecs_task_arn": ecs_task_arn,
+            "duration_seconds": round(duration, 3),
+        })
 
-            return TaskResult(
-                exit_code=0,
-                stdout=f"Server running (ECS task: {task_short_id})",
-                stderr="",
-                duration_seconds=duration,
-            )
+        # Tail CloudWatch logs live — blocks until Ctrl+C.
+        # The server keeps running after the user stops tailing.
+        await self._tail_logs(ecs_task_arn, state)
+
+        return TaskResult(
+            exit_code=0,
+            stdout=stdout_result,
+            stderr="",
+            duration_seconds=duration,
+        )
 
     # -----------------------------------------------------------------------
     # Sync helpers (called via asyncio.to_thread)
@@ -528,10 +541,15 @@ class FargateRuntime(Runtime):
     ) -> str:
         """Launch an ECS Fargate task and return its task ARN.
 
+        The injected command runs three stages in sequence:
+          1. _S3_DOWNLOAD_BOOTSTRAP — download workspace from S3 into /workspace
+          2. _S3_DEPS_BOOTSTRAP     — cd /workspace, pip/npm install if manifests present
+          3. task                   — the user's command
+
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
         """
-        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {task}"
+        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {_S3_DEPS_BOOTSTRAP} && {task}"
 
         # Server mode: attach the server SG (ALL TCP inbound) alongside the
         # standard batch SG. Batch mode: batch SG only.
@@ -680,6 +698,86 @@ class FargateRuntime(Runtime):
                 )
 
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+    async def _tail_logs(
+        self,
+        ecs_task_arn: str,
+        state: _FargateInstanceState,
+    ) -> None:
+        """Stream CloudWatch Logs for a running server task until Ctrl+C.
+
+        Waits up to 35s for the log stream to be created (Fargate tasks take a
+        few seconds to start writing). Polls every 2s for new events and prints
+        them directly to stdout. Handles Ctrl+C gracefully — the server task
+        keeps running after tailing stops.
+        """
+        task_short_id = ecs_task_arn.split("/")[-1]
+        stream_name = f"sandboxshift/sandbox/{task_short_id}"
+        logs_client = self._session.client("logs", region_name=self._region)
+
+        print(
+            f"{_C_BLUE}[sandboxshift]{_C_RESET} "
+            f"Streaming logs (Ctrl+C to stop tailing — server stays running):\n",
+            flush=True,
+        )
+
+        # Wait for the log stream to be created (task startup takes a few seconds)
+        stream_ready = False
+        for attempt in range(_LOG_STREAM_WAIT_ATTEMPTS):
+            try:
+                resp = await asyncio.to_thread(
+                    logs_client.describe_log_streams,
+                    logGroupName=state.log_group,
+                    logStreamNamePrefix=stream_name,
+                )
+                if resp.get("logStreams"):
+                    stream_ready = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt < _LOG_STREAM_WAIT_ATTEMPTS - 1:
+                await asyncio.sleep(5)
+
+        if not stream_ready:
+            _step(
+                "Log stream not yet available — "
+                f"check CloudWatch console: {state.log_group}"
+            )
+            return
+
+        next_token: str | None = None
+        try:
+            while True:
+                kwargs: dict = {
+                    "logGroupName": state.log_group,
+                    "logStreamName": stream_name,
+                    "startFromHead": True,
+                }
+                if next_token:
+                    kwargs["nextToken"] = next_token
+
+                resp = await asyncio.to_thread(logs_client.get_log_events, **kwargs)
+                events = resp.get("events", [])
+                for event in events:
+                    print(event["message"], flush=True)
+
+                # get_log_events returns the same token when there are no new events;
+                # only advance the token when new events were returned.
+                new_token = resp.get("nextForwardToken")
+                if new_token != next_token:
+                    next_token = new_token
+
+                await asyncio.sleep(_LOG_TAIL_POLL_SECONDS)
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+
+        print(flush=True)
+        print(
+            f"{_C_BLUE}[sandboxshift]{_C_RESET} "
+            "Log tail stopped. Server is still running.",
+            flush=True,
+        )
 
     def _get_task_public_ip(
         self, task_arn: str, state: _FargateInstanceState
