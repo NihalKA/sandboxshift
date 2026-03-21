@@ -12,11 +12,15 @@ knows how to build FargateRuntime (which needs cluster_arn, subnet_ids, etc.
 that are not in SandboxConfig). This follows the same single-responsibility
 pattern as Decision #12 (BurstEngine enforces FORCE_LOCAL, not SandboxManager).
 
+Port-forwarded tasks in cloud mode are handled by FargateRuntime in server mode:
+the task is launched with a public-IP security group, execute() returns as soon
+as the task is RUNNING, and destroy() skips the ECS stop (task keeps running).
+Use `sandboxshift stop <instance_id>` to terminate a cloud server task.
+
 Audit events emitted:
   "run_start"                 — before scan; always emitted
   "sensitivity_check_skipped" — when config.skip_sensitivity_check is True
   "sensitivity_blocked"       — when findings caused the run to be blocked
-  "ports_force_local"         — when config.ports is non-empty, overriding cloud decision
   "cloud_runtime_unavailable" — when decision==cloud/preferred but cloud_runtime is None
   "run_complete"              — after successful execute + destroy
 """
@@ -162,21 +166,22 @@ class SandboxManager:
               If findings exist → emit "sensitivity_blocked" audit event and
               raise SensitivityBlockedError(findings). No execution occurs.
           3. BurstEngine.decide(scan_result, workspace, config) → BurstDecision.
-          4. If config.ports is non-empty and mode == "cloud": override to local.
-             Port-forwarded servers require a direct host↔container tunnel which
-             does not exist in Fargate (V1). Emit "ports_force_local" audit event.
-             (Decision #57)
-          5. If decision.mode == "cloud" but cloud_runtime is None:
+          4. If decision.mode == "cloud" but cloud_runtime is None:
              - confidence="preferred" → emit "cloud_runtime_unavailable" audit
                event; override mode to "local" (graceful fallback).
              - confidence="forced" → emit "cloud_runtime_unavailable" audit
                event; raise CloudRuntimeRequiredError. Run is blocked entirely.
-          6. Select runtime: cloud_runtime if mode=="cloud", else local_runtime.
-          7. runtime.provision(workspace, config) → instance_id.
-          8. try: runtime.execute(instance_id, task, config) → TaskResult
+          5. Select runtime: cloud_runtime if mode=="cloud", else local_runtime.
+          6. runtime.provision(workspace, config) → instance_id.
+          7. try: runtime.execute(instance_id, task, config) → TaskResult
              finally: runtime.destroy(instance_id)  [always runs]
-          9. Build and return RunResult.
-         10. Emit "run_complete" audit event.
+          8. Build and return RunResult.
+          9. Emit "run_complete" audit event.
+
+        Port-forwarded tasks in cloud mode (config.ports non-empty, mode=="cloud"):
+        FargateRuntime handles this as server mode — it launches the task with a
+        public-IP security group, waits until RUNNING, prints the URL, and returns
+        immediately. destroy() skips the ECS stop so the task keeps running.
 
         If provision() raises, destroy() is NOT called (no instance to destroy).
         If execute() raises, destroy() IS called (finally block), then the
@@ -242,24 +247,7 @@ class SandboxManager:
 
         runtime_mode = decision.mode
 
-        # Step 4: Port-forwarded tasks must always run locally (Decision #57).
-        # Fargate has no host↔container tunnel — localhost:PORT would not reach
-        # the container. Override cloud→local silently and audit the reason.
-        if config.ports and runtime_mode == "cloud":
-            self._audit.record(
-                {
-                    "event": "ports_force_local",
-                    "workspace": str(workspace),
-                    "ports": [[h, c] for h, c in config.ports],
-                    "reason": (
-                        "Port-forwarded tasks require a direct host↔container tunnel "
-                        "which is not available in Fargate (V1). Overriding to local."
-                    ),
-                }
-            )
-            runtime_mode = "local"
-
-        # Step 5: Cloud fallback / block when cloud_runtime is not available.
+        # Step 4: Cloud fallback / block when cloud_runtime is not available.
         # - confidence="preferred": RAM threshold advisory → fall back to local.
         # - confidence="forced": hard requirement (min_cpu / min_memory) → block.
         if runtime_mode == "cloud" and self._cloud_runtime is None:
@@ -276,23 +264,23 @@ class SandboxManager:
             # confidence == "preferred" — advisory only, fall back gracefully.
             runtime_mode = "local"
 
-        # Step 6: Runtime selection
+        # Step 5: Runtime selection
         runtime: Runtime = (
             self._cloud_runtime  # type: ignore[assignment]  # guarded by mode check above
             if runtime_mode == "cloud"
             else self._local_runtime
         )
 
-        # Step 7: Provision
+        # Step 6: Provision
         instance_id = await runtime.provision(workspace, config)
 
-        # Step 8: Execute with guaranteed destroy
+        # Step 7: Execute with guaranteed destroy
         try:
             task_result = await runtime.execute(instance_id, task, config)
         finally:
             await runtime.destroy(instance_id)
 
-        # Steps 9-10: Build result + audit
+        # Steps 8-9: Build result + audit
         duration = time.perf_counter() - wall_start
 
         result = RunResult(
