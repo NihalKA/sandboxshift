@@ -56,7 +56,8 @@ class SensitivityBlockedError(Exception):
         self.findings = findings
         super().__init__(
             f"Workspace contains sensitive data ({len(findings)} finding(s)). "
-            "Pass skip_sensitivity_check=True to override."
+            "To override: pass --skip-sensitivity-check on the CLI, or add "
+            "'skip_sensitivity_check: true' under the 'sandbox' key in sandboxshift.yaml."
         )
 
 
