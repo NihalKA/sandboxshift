@@ -317,13 +317,13 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     print(f"Runtime: {result.runtime_mode}")
     print(f"Duration: {result.duration_seconds:.2f}s")
-    print(f"Exit code: {result.exit_code}")
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
+    print(f"Exit code: {result.task_result.exit_code}")
+    if result.task_result.stdout:
+        print(result.task_result.stdout)
+    if result.task_result.stderr:
+        print(result.task_result.stderr, file=sys.stderr)
 
-    sys.exit(result.exit_code)
+    sys.exit(result.task_result.exit_code)
 
 
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
