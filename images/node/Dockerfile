@@ -29,7 +29,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for runtime execution.
+# chown /workspace so the sandboxshift user can write files during S3 bootstrap.
 RUN groupadd -g 10000 sandboxshift \
- && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift
+ && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift \
+ && chown 10000:10000 /workspace
 
 USER 10000:10000
