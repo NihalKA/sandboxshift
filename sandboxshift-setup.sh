@@ -1,410 +1,346 @@
 #!/usr/bin/env bash
-# sandboxshift-setup.sh — One-command AWS infrastructure bootstrap for SandboxShift.
+# =============================================================================
+# sandboxshift-setup.sh
+#
+# One-script setup for SandboxShift.
+#
+#   ./sandboxshift-setup.sh           # auto-detect (cloud if AWS creds present)
+#   ./sandboxshift-setup.sh local     # local mode only — no AWS needed
+#   ./sandboxshift-setup.sh cloud     # full cloud setup (ECR + Terraform + fargate.env)
 #
 # What this script does:
-#   1.  Detects your AWS account ID and region automatically
-#   2.  Creates an S3 bucket for Terraform remote state
-#   3.  Creates a DynamoDB table for Terraform state locking
-#   4.  Creates ECR repositories for all three runtime images
-#   5.  Builds and pushes runtime images to ECR (python, node, multi)
-#   6.  Patches terraform/fargate/backend.tf
-#   7.  Runs terraform init + terraform apply (wires ECR image into task definition)
-#   8.  Writes all FARGATE_* env vars to ~/.sandboxshift/fargate.env
-#       (auto-loaded by the CLI — no manual source needed)
 #
-# Usage:
-#   chmod +x sandboxshift-setup.sh
-#   ./sandboxshift-setup.sh
+#   Both tracks:
+#     1. Check prerequisites
+#     2. pip install -e .
+#     3. Build all 3 runtime images into Podman local store
 #
-# Optional env var overrides:
-#   AWS_REGION           Override region (default: auto-detected from AWS config)
-#   SANDBOXSHIFT_ENV     Deployment tag (default: dev)
-#
-# Requirements:
-#   - aws CLI configured (aws configure or AWS_PROFILE)
-#   - terraform >= 1.5
-#   - podman  (brew install podman)
-#   - skopeo  (brew install skopeo)  — used for reliable cross-platform image push
-#   - jq      (brew install jq)
+#   Cloud track additionally:
+#     4. Verify AWS credentials
+#     5. Resolve AWS account ID and region
+#     6. Create ECR repository (sandboxshift/runtime-multi) if missing
+#     7. Login Podman to ECR
+#     8. Tag and push runtime-multi to ECR
+#     9. Write terraform/fargate/terraform.tfvars
+#    10. terraform init && terraform apply
+#    11. Collect all terraform outputs → write ~/.sandboxshift/fargate.env
+#    12. Print a ready-to-use test command
+# =============================================================================
 
 set -euo pipefail
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ───────────────────────────────────────────────────────────────────────────────
-
-BLUE='\033[0;34m'
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+RESET='\033[0m'
 
-info()  { echo -e "${BLUE}[sandboxshift]${NC} $*"; }
-ok()    { echo -e "${GREEN}[sandboxshift]${NC} \u2713 $*"; }
-warn()  { echo -e "${YELLOW}[sandboxshift]${NC} \u26a0 $*"; }
-error() { echo -e "${RED}[sandboxshift]${NC} \u2717 $*" >&2; exit 1; }
+step()  { echo -e "${BLUE}[sandboxshift-setup]${RESET} $*"; }
+ok()    { echo -e "${GREEN}[sandboxshift-setup]${RESET} ${GREEN}✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[sandboxshift-setup]${RESET} ${YELLOW}⚠${RESET}  $*"; }
+die()   { echo -e "${RED}[sandboxshift-setup]${RESET} ${RED}✗${RESET} $*" >&2; exit 1; }
 
-check_dependency() {
-  command -v "$1" &>/dev/null || error "'$1' is required but not installed. $2"
-}
-
-ensure_ecr_repo() {
-  local repo_name="$1"
-  if aws ecr describe-repositories \
-      --repository-names "${repo_name}" \
-      --region "${REGION}" &>/dev/null; then
-    ok "ECR repo already exists: ${repo_name}"
-  else
-    info "Creating ECR repo: ${repo_name}"
-    aws ecr create-repository \
-      --repository-name "${repo_name}" \
-      --region "${REGION}" \
-      --image-scanning-configuration scanOnPush=true \
-      --output text > /dev/null
-    ok "Created ECR repo: ${repo_name}"
-  fi
-}
-
-build_and_push() {
-  local image_dir="$1"   # e.g. images/python
-  local local_tag="$2"   # e.g. sandboxshift/runtime-python:3.11
-  local ecr_tag="$3"     # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com/sandboxshift/runtime-python:3.11
-
-  info "Building ${local_tag} (linux/amd64, --pull=always)..."
-  # --pull=always  — force-pull the AMD64 base; never reuse cached ARM64 layers.
-  # --platform     — cross-compile to AMD64 on Apple Silicon.
-  podman build \
-    --platform linux/amd64 \
-    --pull=always \
-    -t "${local_tag}" \
-    "${SCRIPT_DIR}/${image_dir}"
-
-  # Push via: podman save  →  temp tar on macOS  →  skopeo push to ECR
-  #
-  # WHY NOT podman push:
-  #   podman push routes traffic through the QEMU Linux VM's TCP stack.
-  #   That VM has TCP Segmentation Offload (TSO) enabled, which assembles
-  #   packets larger than the real macOS → AWS path can carry, causing
-  #   "write: broken pipe" on large blob uploads, regardless of MTU tuning.
-  #
-  # WHY NOT skopeo containers-storage:
-  #   On macOS, podman stores images inside the QEMU VM, not in the local
-  #   macOS containers storage. containers-storage: looks at the local store
-  #   and finds nothing — "does not resolve to an image ID".
-  #
-  # THE FIX — two steps:
-  #   1. podman save  — runs as a podman client call; the image is streamed
-  #      out of the QEMU VM and written to a temp tar file on the macOS
-  #      filesystem. This uses the Podman REST socket, not raw TCP.
-  #   2. skopeo copy docker-archive:  — reads the local tar file and uploads
-  #      to ECR using macOS's own TCP stack. No VM involved. Reliable.
-  #
-  # Auth: podman login already wrote ~/.config/containers/auth.json above.
-  #       skopeo reads the same file automatically.
-  local tmp_tar
-  tmp_tar=$(mktemp -t "sandboxshift-image-XXXX.tar")
-  # shellcheck disable=SC2064
-  trap "rm -f '${tmp_tar}'" RETURN
-
-  info "Exporting ${local_tag} from Podman VM..."
-  podman save -o "${tmp_tar}" "${local_tag}"
-
-  info "Pushing ${ecr_tag} (via skopeo, native macOS TCP)..."
-  skopeo copy \
-    --override-os  linux \
-    --override-arch amd64 \
-    "docker-archive:${tmp_tar}" \
-    "docker://${ecr_tag}"
-
-  ok "Pushed ${ecr_tag}"
-}
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Preflight checks
-# ───────────────────────────────────────────────────────────────────────────────
-
-echo ""
-echo -e "${BLUE}\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588${NC}"
-echo -e "${BLUE}  SandboxShift \u2014 AWS Infrastructure Setup${NC}"
-echo -e "${BLUE}\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588${NC}"
-echo ""
-
-check_dependency aws       "Install with: brew install awscli"
-check_dependency terraform "Install with: brew install terraform"
-check_dependency podman    "Install with: brew install podman && podman machine init && podman machine start"
-check_dependency skopeo    "Install with: brew install skopeo"
-check_dependency jq        "Install with: brew install jq"
-
+# ---------------------------------------------------------------------------
+# Script location — all paths are relative to repo root
+# ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TF_DIR="${SCRIPT_DIR}/terraform/fargate"
-[[ -f "${TF_DIR}/main.tf" ]] || error "Run this script from the sandboxshift repo root."
+cd "$SCRIPT_DIR"
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Detect AWS identity
-# ───────────────────────────────────────────────────────────────────────────────
-
-info "Detecting AWS identity..."
-IDENTITY=$(aws sts get-caller-identity 2>/dev/null) \
-  || error "AWS credentials not configured. Run 'aws configure' first."
-
-ACCOUNT_ID=$(echo "${IDENTITY}" | jq -r '.Account')
-CALLER_ARN=$(echo "${IDENTITY}" | jq -r '.Arn')
-
-if [[ -n "${AWS_REGION:-}" ]]; then
-  REGION="${AWS_REGION}"
-elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-  REGION="${AWS_DEFAULT_REGION}"
-else
-  REGION=$(aws configure get region 2>/dev/null || true)
-  if [[ -z "${REGION}" ]]; then
-    echo -n "Enter AWS region (e.g. us-east-1): "
-    read -r REGION
-    [[ -n "${REGION}" ]] || error "Region is required."
-  fi
+# ---------------------------------------------------------------------------
+# Parse mode argument
+# ---------------------------------------------------------------------------
+MODE="${1:-auto}"
+if [[ "$MODE" != "local" && "$MODE" != "cloud" && "$MODE" != "auto" ]]; then
+  die "Unknown mode '${MODE}'. Usage: $0 [local|cloud|auto]"
 fi
 
-ENV_TAG="${SANDBOXSHIFT_ENV:-dev}"
-
-# ECR registry hostname is always deterministic — no API call needed.
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-
-ok "Account:      ${ACCOUNT_ID}"
-ok "Region:       ${REGION}"
-ok "ECR registry: ${ECR_REGISTRY}"
-ok "Caller:       ${CALLER_ARN}"
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Persistent setup state
-# ───────────────────────────────────────────────────────────────────────────────
-
-SETUP_ENV="${HOME}/.sandboxshift/setup.env"
-mkdir -p "${HOME}/.sandboxshift"
-
-if [[ -f "${SETUP_ENV}" ]]; then
-  # shellcheck disable=SC1090
-  source "${SETUP_ENV}"
-  info "Reusing existing setup: ${SETUP_ENV}"
-else
-  RAND_HASH=$(openssl rand -hex 3)
-  STATE_BUCKET="sandboxshift-tfstate-${ACCOUNT_ID}-${RAND_HASH}"
-  LOCK_TABLE="sandboxshift-tfstate-lock-${RAND_HASH}"
-
-  cat > "${SETUP_ENV}" <<EOF
-# SandboxShift setup — auto-generated by sandboxshift-setup.sh
-# Do not edit manually.
-RAND_HASH=${RAND_HASH}
-STATE_BUCKET=${STATE_BUCKET}
-LOCK_TABLE=${LOCK_TABLE}
-ACCOUNT_ID=${ACCOUNT_ID}
-REGION=${REGION}
-EOF
-  ok "Generated unique names (saved to ${SETUP_ENV})"
-fi
-
-info "State bucket: ${STATE_BUCKET}"
-info "Lock table:   ${LOCK_TABLE}"
-info "Workspace bucket: auto-generated by Terraform"
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 1: S3 Terraform state bucket
-# ───────────────────────────────────────────────────────────────────────────────
-
-if aws s3api head-bucket --bucket "${STATE_BUCKET}" --region "${REGION}" 2>/dev/null; then
-  ok "State bucket already exists: ${STATE_BUCKET}"
-else
-  info "Creating state bucket: ${STATE_BUCKET}"
-  if [[ "${REGION}" == "us-east-1" ]]; then
-    aws s3api create-bucket \
-      --bucket "${STATE_BUCKET}" \
-      --region "${REGION}" \
-      --output text > /dev/null
+# ---------------------------------------------------------------------------
+# Step 0: auto-detect mode
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "auto" ]]; then
+  step "Auto-detecting setup mode ..."
+  if aws sts get-caller-identity &>/dev/null 2>&1; then
+    MODE="cloud"
+    ok "AWS credentials found — running cloud setup"
   else
-    aws s3api create-bucket \
-      --bucket "${STATE_BUCKET}" \
-      --region "${REGION}" \
-      --create-bucket-configuration LocationConstraint="${REGION}" \
-      --output text > /dev/null
+    MODE="local"
+    warn "No AWS credentials found — running local-only setup"
+    warn "Run './sandboxshift-setup.sh cloud' later to enable cloud burst"
   fi
-  aws s3api put-bucket-versioning \
-    --bucket "${STATE_BUCKET}" \
-    --versioning-configuration Status=Enabled
-  aws s3api put-bucket-encryption \
-    --bucket "${STATE_BUCKET}" \
-    --server-side-encryption-configuration \
-      '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-  aws s3api put-public-access-block \
-    --bucket "${STATE_BUCKET}" \
-    --public-access-block-configuration \
-      BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-  ok "State bucket created and secured."
 fi
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 2: DynamoDB lock table
-# ───────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Step 1: Check prerequisites
+# ---------------------------------------------------------------------------
+step "Checking prerequisites ..."
 
-LOCK_STATUS=$(aws dynamodb describe-table \
-  --table-name "${LOCK_TABLE}" \
-  --region "${REGION}" \
-  --query 'Table.TableStatus' \
-  --output text 2>/dev/null || echo "NOT_FOUND")
-
-if [[ "${LOCK_STATUS}" != "NOT_FOUND" ]]; then
-  ok "DynamoDB lock table already exists: ${LOCK_TABLE}"
-else
-  info "Creating DynamoDB lock table: ${LOCK_TABLE}"
-  aws dynamodb create-table \
-    --table-name "${LOCK_TABLE}" \
-    --attribute-definitions AttributeName=LockID,AttributeType=S \
-    --key-schema AttributeName=LockID,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    --region "${REGION}" \
-    --output text > /dev/null
-  info "Waiting for table to become active..."
-  aws dynamodb wait table-exists \
-    --table-name "${LOCK_TABLE}" \
-    --region "${REGION}"
-  ok "DynamoDB lock table created."
-fi
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 3: ECR repositories
-# ───────────────────────────────────────────────────────────────────────────────
-
-info "Setting up ECR repositories..."
-ensure_ecr_repo "sandboxshift/runtime-python"
-ensure_ecr_repo "sandboxshift/runtime-node"
-ensure_ecr_repo "sandboxshift/runtime-multi"
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 4: Podman login to ECR
-# (podman login writes ~/.config/containers/auth.json which skopeo reads)
-# ───────────────────────────────────────────────────────────────────────────────
-
-info "Logging in to ECR..."
-aws ecr get-login-password --region "${REGION}" \
-  | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
-ok "ECR credentials stored (used by both podman and skopeo)."
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 5: Build and push runtime images
-# Base images are from Docker Hub (python:3.11-slim, node:20-slim).
-# No extra logins required — Docker Hub official images are always public.
-# ───────────────────────────────────────────────────────────────────────────────
-
-info "Building and pushing runtime images (linux/amd64 — this may take a few minutes)..."
-echo ""
-
-build_and_push \
-  "images/python" \
-  "sandboxshift/runtime-python:3.11" \
-  "${ECR_REGISTRY}/sandboxshift/runtime-python:3.11"
-
-build_and_push \
-  "images/node" \
-  "sandboxshift/runtime-node:20" \
-  "${ECR_REGISTRY}/sandboxshift/runtime-node:20"
-
-build_and_push \
-  "images/multi" \
-  "sandboxshift/runtime-multi:latest" \
-  "${ECR_REGISTRY}/sandboxshift/runtime-multi:latest"
-
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 6: Patch backend.tf
-# ───────────────────────────────────────────────────────────────────────────────
-
-info "Patching terraform/fargate/backend.tf..."
-cat > "${TF_DIR}/backend.tf" <<EOF
-# Auto-generated by sandboxshift-setup.sh — do not edit manually.
-# Re-run ./sandboxshift-setup.sh to regenerate.
-terraform {
-  backend "s3" {
-    bucket         = "${STATE_BUCKET}"
-    key            = "sandboxshift/fargate/terraform.tfstate"
-    region         = "${REGION}"
-    encrypt        = true
-    dynamodb_table = "${LOCK_TABLE}"
-  }
+check_cmd() {
+  local cmd="$1" install_hint="$2"
+  if ! command -v "$cmd" &>/dev/null; then
+    die "'${cmd}' not found. ${install_hint}"
+  fi
 }
+
+check_cmd python3  "Install Python 3.11+: https://python.org"
+check_cmd pip      "Install pip: https://pip.pypa.io"
+check_cmd podman   "Install Podman: https://podman.io/getting-started/installation"
+
+# Python version check
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ) ]]; then
+  die "Python 3.11+ required, found ${PY_VER}"
+fi
+
+# Podman rootless check
+if ! podman info 2>/dev/null | grep -q 'rootless: true' && \
+   ! podman info 2>/dev/null | grep -q 'rootlessCompute: true'; then
+  # On macOS with podman machine, rootless is implicit
+  if [[ "$(uname)" == "Darwin" ]]; then
+    # Check if podman machine is running
+    if ! podman machine inspect &>/dev/null 2>&1 || \
+       ! podman machine list 2>/dev/null | grep -q 'Currently running'; then
+      warn "Podman machine is not running — starting it now ..."
+      if ! podman machine inspect &>/dev/null 2>&1; then
+        step "Initialising Podman machine (first time, ~2min) ..."
+        podman machine init
+      fi
+      podman machine start
+      ok "Podman machine started"
+    fi
+  else
+    warn "Podman rootless check inconclusive — continuing. Run: podman info | grep rootless"
+  fi
+fi
+
+if [[ "$MODE" == "cloud" ]]; then
+  check_cmd aws       "Install AWS CLI v2: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
+  check_cmd terraform "Install Terraform: https://developer.hashicorp.com/terraform/install"
+  check_cmd jq        "Install jq: https://jqlang.github.io/jq/download/"
+fi
+
+ok "Prerequisites OK (Python ${PY_VER}, Podman $(podman --version | awk '{print $3}'))"
+
+# ---------------------------------------------------------------------------
+# Step 2: Install sandboxshift Python package
+# ---------------------------------------------------------------------------
+step "Installing sandboxshift (pip install -e .) ..."
+pip install -e . --quiet
+ok "sandboxshift installed — $(sandboxshift --help | head -1)"
+
+# ---------------------------------------------------------------------------
+# Step 3: Build runtime images into Podman local store
+# ---------------------------------------------------------------------------
+step "Building runtime images into Podman local store ..."
+echo
+
+BUILD_FAILED=0
+
+build_image() {
+  local tag="$1" context="$2"
+  step "  Building ${tag} from ${context} ..."
+  if podman build -t "$tag" "$context" --quiet; then
+    ok "  ${tag}"
+  else
+    warn "  Failed to build ${tag} — continuing (non-fatal for local use if not needed)"
+    BUILD_FAILED=1
+  fi
+}
+
+build_image "sandboxshift/runtime-python:3.11" "images/python"
+build_image "sandboxshift/runtime-node:20"      "images/node"
+build_image "sandboxshift/runtime-multi:latest" "images/multi"
+echo
+
+if [[ "$BUILD_FAILED" -eq 1 ]]; then
+  warn "One or more image builds failed. Local mode may be limited."
+else
+  ok "All runtime images built"
+fi
+
+# Short-circuit if local-only
+if [[ "$MODE" == "local" ]]; then
+  echo
+  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+  echo -e "${GREEN}${BOLD}  SandboxShift is ready for local use!${RESET}"
+  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+  echo
+  echo -e "  Try it:"
+  echo -e "    mkdir -p /tmp/ss-test"
+  echo -e "    echo 'print(\"hello from sandbox\")' > /tmp/ss-test/hello.py"
+  echo -e "    ${BOLD}sandboxshift run /tmp/ss-test \"python hello.py\"${RESET}"
+  echo
+  echo -e "  To enable cloud burst later:"
+  echo -e "    ${BOLD}./sandboxshift-setup.sh cloud${RESET}"
+  echo
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: Verify AWS credentials
+# ---------------------------------------------------------------------------
+step "Verifying AWS credentials ..."
+if ! IDENTITY=$(aws sts get-caller-identity 2>&1); then
+  die "AWS credentials not configured or invalid.\n  Run: aws configure\n  Or set: AWS_PROFILE / AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
+fi
+ACCOUNT_ID=$(echo "$IDENTITY" | jq -r '.Account')
+ok "AWS account: ${ACCOUNT_ID}"
+
+# ---------------------------------------------------------------------------
+# Step 5: Resolve region
+# ---------------------------------------------------------------------------
+AWS_REGION_RESOLVED="${AWS_DEFAULT_REGION:-${AWS_REGION:-}}"
+if [[ -z "$AWS_REGION_RESOLVED" ]]; then
+  AWS_REGION_RESOLVED=$(aws configure get region 2>/dev/null || true)
+fi
+if [[ -z "$AWS_REGION_RESOLVED" ]]; then
+  echo
+  echo -n -e "${BLUE}[sandboxshift-setup]${RESET} AWS region (e.g. us-east-1): "
+  read -r AWS_REGION_RESOLVED
+  [[ -z "$AWS_REGION_RESOLVED" ]] && die "Region is required."
+fi
+ok "Region: ${AWS_REGION_RESOLVED}"
+
+# ---------------------------------------------------------------------------
+# Step 6: Create ECR repository if missing
+# ---------------------------------------------------------------------------
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION_RESOLVED}.amazonaws.com"
+ECR_REPO="sandboxshift/runtime-multi"
+ECR_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:latest"
+
+step "Ensuring ECR repository '${ECR_REPO}' exists ..."
+if aws ecr describe-repositories \
+     --repository-names "$ECR_REPO" \
+     --region "$AWS_REGION_RESOLVED" &>/dev/null; then
+  ok "ECR repository already exists"
+else
+  step "Creating ECR repository ..."
+  aws ecr create-repository \
+    --repository-name "$ECR_REPO" \
+    --region "$AWS_REGION_RESOLVED" \
+    --image-scanning-configuration scanOnPush=true \
+    --tags Key=Project,Value=SandboxShift >/dev/null
+  ok "ECR repository created: ${ECR_REPO}"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 7: Podman login to ECR
+# ---------------------------------------------------------------------------
+step "Logging Podman in to ECR ..."
+aws ecr get-login-password --region "$AWS_REGION_RESOLVED" | \
+  podman login --username AWS --password-stdin "$ECR_REGISTRY"
+ok "Podman logged in to ${ECR_REGISTRY}"
+
+# ---------------------------------------------------------------------------
+# Step 8: Tag and push runtime-multi to ECR
+# ---------------------------------------------------------------------------
+step "Tagging sandboxshift/runtime-multi:latest → ${ECR_IMAGE_URI} ..."
+podman tag "sandboxshift/runtime-multi:latest" "$ECR_IMAGE_URI"
+
+step "Pushing to ECR (this may take ~1-2 min on first push) ..."
+podman push "$ECR_IMAGE_URI"
+ok "Image pushed: ${ECR_IMAGE_URI}"
+
+# ---------------------------------------------------------------------------
+# Step 9: Write terraform.tfvars
+# ---------------------------------------------------------------------------
+TF_DIR="$SCRIPT_DIR/terraform/fargate"
+TF_VARS_FILE="$TF_DIR/terraform.tfvars"
+
+step "Writing ${TF_VARS_FILE} ..."
+cat > "$TF_VARS_FILE" <<EOF
+aws_region   = "${AWS_REGION_RESOLVED}"
+ecr_registry = "${ECR_REGISTRY}"
 EOF
-ok "backend.tf patched."
+ok "terraform.tfvars written"
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 7: terraform init + apply
-# ───────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Step 10: terraform init + apply
+# ---------------------------------------------------------------------------
+step "Running terraform init ..."
+(cd "$TF_DIR" && terraform init -upgrade -input=false -no-color 2>&1 | \
+  grep -v '^$' | sed 's/^/  /')
+ok "terraform init complete"
 
-info "Running terraform init..."
-cd "${TF_DIR}"
-terraform init -reconfigure \
-  -backend-config="bucket=${STATE_BUCKET}" \
-  -backend-config="key=sandboxshift/fargate/terraform.tfstate" \
-  -backend-config="region=${REGION}" \
-  -backend-config="dynamodb_table=${LOCK_TABLE}" \
-  -backend-config="encrypt=true"
-ok "terraform init complete."
-echo ""
+step "Running terraform apply (this provisions AWS resources ~1-2 min) ..."
+(cd "$TF_DIR" && terraform apply -auto-approve -input=false -no-color 2>&1 | \
+  grep -v '^$' | sed 's/^/  /')
+ok "terraform apply complete"
 
-info "Running terraform apply..."
-terraform apply -auto-approve \
-  -var="aws_region=${REGION}" \
-  -var="ecr_registry=${ECR_REGISTRY}" \
-  -var="environment=${ENV_TAG}"
-ok "terraform apply complete."
-echo ""
+# ---------------------------------------------------------------------------
+# Step 11: Collect terraform outputs → ~/.sandboxshift/fargate.env
+# ---------------------------------------------------------------------------
+ENV_DIR="$HOME/.sandboxshift"
+ENV_FILE="$ENV_DIR/fargate.env"
+mkdir -p "$ENV_DIR"
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Step 8: Read outputs and write fargate.env
-# ───────────────────────────────────────────────────────────────────────────────
+step "Reading terraform outputs ..."
+TF_OUTPUTS=$(cd "$TF_DIR" && terraform output -json)
 
-info "Reading terraform outputs..."
-TF_OUTPUTS=$(terraform output -json)
+extract() { echo "$TF_OUTPUTS" | jq -r ".${1}.value // empty"; }
+extract_json_csv() { echo "$TF_OUTPUTS" | jq -r ".${1}.value | join(\",\")"; }
 
-CLUSTER_ARN=$(echo "${TF_OUTPUTS}"          | jq -r '.cluster_arn.value')
-TASK_DEF_ARN=$(echo "${TF_OUTPUTS}"         | jq -r '.task_def_arn.value')
-LOG_GROUP=$(echo "${TF_OUTPUTS}"            | jq -r '.log_group.value')
-SUBNET_IDS_CSV=$(echo "${TF_OUTPUTS}"       | jq -r '.subnet_ids.value | join(",")')
-SEC_GROUP_IDS=$(echo "${TF_OUTPUTS}"        | jq -r '.security_group_ids.value | join(",")')
-SERVER_SG_ID=$(echo "${TF_OUTPUTS}"         | jq -r '.server_security_group_id.value')
-WORKSPACE_BUCKET=$(echo "${TF_OUTPUTS}"     | jq -r '.workspace_bucket_name.value')
+CLUSTER_ARN=$(extract cluster_arn)
+TASK_DEF_ARN=$(extract task_def_arn)
+SUBNET_IDS=$(extract_json_csv subnet_ids)
+SECURITY_GROUP_IDS=$(extract_json_csv security_group_ids)
+LOG_GROUP=$(extract log_group)
+REGION=$(extract region)
+WORKSPACE_BUCKET=$(extract workspace_bucket_name)
+SERVER_SG_ID=$(extract server_security_group_id)
 
-FARGATE_ENV="${HOME}/.sandboxshift/fargate.env"
-cat > "${FARGATE_ENV}" <<EOF
-# SandboxShift Fargate env vars — auto-generated by sandboxshift-setup.sh
-# Auto-loaded by the CLI — no manual source needed.
+[[ -z "$CLUSTER_ARN" ]]        && die "Could not read cluster_arn from terraform output"
+[[ -z "$TASK_DEF_ARN" ]]       && die "Could not read task_def_arn from terraform output"
+[[ -z "$SUBNET_IDS" ]]         && die "Could not read subnet_ids from terraform output"
+[[ -z "$SECURITY_GROUP_IDS" ]] && die "Could not read security_group_ids from terraform output"
+[[ -z "$LOG_GROUP" ]]          && die "Could not read log_group from terraform output"
+[[ -z "$REGION" ]]             && die "Could not read region from terraform output"
+[[ -z "$WORKSPACE_BUCKET" ]]   && die "Could not read workspace_bucket_name from terraform output"
+
+step "Writing ${ENV_FILE} ..."
+cat > "$ENV_FILE" <<EOF
+# Auto-generated by sandboxshift-setup.sh — do not edit manually.
+# Re-run ./sandboxshift-setup.sh cloud to regenerate after infrastructure changes.
+# This file is auto-loaded by the sandboxshift CLI — no manual export needed.
+
 export FARGATE_CLUSTER_ARN="${CLUSTER_ARN}"
 export FARGATE_TASK_DEFINITION_ARN="${TASK_DEF_ARN}"
-export FARGATE_SUBNET_IDS="${SUBNET_IDS_CSV}"
-export FARGATE_SECURITY_GROUP_IDS="${SEC_GROUP_IDS}"
-export FARGATE_SERVER_SECURITY_GROUP_ID="${SERVER_SG_ID}"
+export FARGATE_SUBNET_IDS="${SUBNET_IDS}"
+export FARGATE_SECURITY_GROUP_IDS="${SECURITY_GROUP_IDS}"
 export FARGATE_LOG_GROUP="${LOG_GROUP}"
 export FARGATE_REGION="${REGION}"
 export FARGATE_WORKSPACE_BUCKET="${WORKSPACE_BUCKET}"
+export FARGATE_SERVER_SECURITY_GROUP_ID="${SERVER_SG_ID}"
 EOF
+ok "fargate.env written to ${ENV_FILE}"
+ok "(auto-loaded by sandboxshift CLI — no manual export needed)"
 
-ok "Env vars saved to ${FARGATE_ENV}"
-echo ""
-
-# ───────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Done
-# ───────────────────────────────────────────────────────────────────────────────
-
-echo -e "${GREEN}"
-echo "  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588"
-echo "  SandboxShift AWS setup complete!"
-echo "  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588"
-echo -e "${NC}"
-echo "  ECR registry:     ${ECR_REGISTRY}"
-echo "  Workspace bucket: ${WORKSPACE_BUCKET}"
-echo ""
-echo "  The CLI auto-loads Fargate credentials \u2014 no export needed."
-echo "  Just run:"
-echo ""
-echo -e "    ${YELLOW}sandboxshift run /tmp/my-project \"echo hello from fargate\" --ram-threshold 999${NC}"
-echo ""
+# ---------------------------------------------------------------------------
+echo
+echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+echo -e "${GREEN}${BOLD}  SandboxShift cloud burst is ready!${RESET}"
+echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════${RESET}"
+echo
+echo -e "  ECR image:      ${BOLD}${ECR_IMAGE_URI}${RESET}"
+echo -e "  S3 bucket:      ${BOLD}${WORKSPACE_BUCKET}${RESET}"
+echo -e "  Region:         ${BOLD}${REGION}${RESET}"
+echo
+echo -e "  Test it (local — uses Podman):"
+echo -e "    mkdir -p /tmp/ss-test"
+echo -e "    echo 'print(\"hello from sandbox\")' > /tmp/ss-test/hello.py"
+echo -e "    ${BOLD}sandboxshift run /tmp/ss-test \"python hello.py\"${RESET}"
+echo
+echo -e "  Test it (cloud burst — forces Fargate):"
+echo -e "    ${BOLD}sandboxshift run /tmp/ss-test \"python hello.py\" --ram-threshold 999999${RESET}"
+echo
+echo -e "  Run a Node.js server in the cloud:"
+echo -e "    ${BOLD}sandboxshift run /your/node-project \"node index.js\" --port 3000 --ram-threshold 999999${RESET}"
+echo -e "    ${BOLD}sandboxshift stop <instance_id>${RESET}  # when done"
+echo

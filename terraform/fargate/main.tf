@@ -250,6 +250,11 @@ resource "aws_security_group" "sandbox_server_task" {
 # This ensures both `python3`/`pip` and `node`/`npm` are available inside
 # the container for _S3_DEPS_BOOTSTRAP (pip install + npm install) and for
 # running Python or Node tasks. (Decision #48)
+#
+# Image resolution:
+#   - ecr_registry set   → <account>.dkr.ecr.<region>.amazonaws.com/sandboxshift/runtime-multi:latest
+#   - ecr_registry empty → sandboxshift/runtime-multi:latest  (bare name, for local testing)
+# The leading-slash bug ("/sandboxshift/runtime-multi") is avoided by this conditional.
 
 resource "aws_ecs_task_definition" "sandbox" {
   family                   = var.task_family
@@ -262,7 +267,7 @@ resource "aws_ecs_task_definition" "sandbox" {
 
   container_definitions = jsonencode([{
     name      = "sandbox"
-    image     = "${var.ecr_registry}/sandboxshift/runtime-multi:latest"
+    image     = var.ecr_registry != "" ? "${var.ecr_registry}/sandboxshift/runtime-multi:latest" : "sandboxshift/runtime-multi:latest"
     essential = true
 
     # entryPoint is set here in the task definition (not overrideable at

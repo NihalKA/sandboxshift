@@ -35,26 +35,44 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 
 ---
 
+## Installation
+
+**Prerequisites:** Python 3.11+, [Podman](https://podman.io/getting-started/installation) (rootless)
+
+```bash
+git clone https://github.com/NihalKA/sandboxshift
+cd sandboxshift
+
+# Local mode only (no AWS needed)
+./sandboxshift-setup.sh local
+
+# Local + cloud burst (requires AWS CLI + Terraform)
+./sandboxshift-setup.sh cloud
+```
+
+The setup script handles everything: installs the Python package, builds runtime images into Podman, and (for cloud) creates ECR repos, pushes images, runs Terraform, and writes `~/.sandboxshift/fargate.env` (auto-loaded by the CLI — no `export` needed).
+
+---
+
 ## Quick Start
 
 ```bash
-# Install
-pip install sandboxshift
+# Run a Python task (local sandbox via Podman)
+sandboxshift run /path/to/your/project "pytest tests/"
 
-# Start the API server
-uvicorn sandboxshift.api:app --factory --host 127.0.0.1 --port 8000
+# Run a Node.js server (local)
+sandboxshift run /path/to/node-app "node index.js" --port 3000
 
-# Run a task (REST API)
-curl -X POST http://localhost:8000/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "workspace": "/path/to/your/project",
-    "task": "pytest tests/",
-    "allowed_hosts": ["pypi.org"]
-  }'
+# Force cloud burst (Fargate)
+sandboxshift run /path/to/project "python main.py" --ram-threshold 999999
+
+# Run a cloud server and tail logs live
+sandboxshift run /path/to/node-app "node index.js" --port 3000 --ram-threshold 999999
+# Ctrl+C to stop tailing (server keeps running)
+sandboxshift stop <instance_id>
 ```
 
-See [Getting Started](docs/getting-started.md) for a full walkthrough including cloud burst setup.
+See [Getting Started](docs/getting-started.md) for a full walkthrough.
 
 ---
 
@@ -64,7 +82,7 @@ See [Getting Started](docs/getting-started.md) for a full walkthrough including 
 ┌─────────────────────────────────────────────────────────┐
 │                      Your Machine                        │
 │                                                          │
-│   POST /run { workspace, task }                          │
+│   sandboxshift run /workspace "task"                     │
 │            │                                             │
 │            ▼                                             │
 │   ┌─────────────────┐                                    │
@@ -110,7 +128,7 @@ SandboxShift auto-detects your language from workspace markers:
 | `package.json` | `sandboxshift/runtime-node:20` |
 | Multiple found | `sandboxshift/runtime-multi` |
 
-Images are Chainguard-based (zero-CVE, non-root, minimal). See [images/](images/) for Dockerfiles and build instructions.
+Images are built locally into Podman by `sandboxshift-setup.sh`. For cloud burst, `runtime-multi` is also pushed to your ECR. See [images/](images/) for Dockerfiles.
 
 ---
 
@@ -146,27 +164,21 @@ Full reference: [docs/configuration.md](docs/configuration.md)
 
 ## Cloud Burst Setup
 
-Cloud burst requires a one-time Terraform apply to provision resources in **your** AWS account.
+Run the one-line setup:
 
 ```bash
-cd terraform/fargate
-terraform init && terraform apply
+./sandboxshift-setup.sh cloud
 ```
 
-Then set 6 environment variables on the API server:
+That's it. The script:
+1. Builds runtime images and pushes `runtime-multi` to your ECR
+2. Runs `terraform apply` to provision the ECS cluster, S3 bucket, IAM roles, and security groups in your AWS account
+3. Writes `~/.sandboxshift/fargate.env` with all 8 connection variables
+4. The CLI auto-loads `fargate.env` on every run — no `export` commands needed
 
-| Env var | Source |
-|---------|--------|
-| `FARGATE_CLUSTER_ARN` | `terraform output -raw cluster_arn` |
-| `FARGATE_TASK_DEFINITION_ARN` | `terraform output -raw task_def_arn` |
-| `FARGATE_SUBNET_IDS` | `terraform output -json subnet_ids \| jq -r 'join(",")'` |
-| `FARGATE_SECURITY_GROUP_IDS` | `terraform output -json security_group_ids \| jq -r 'join(",")'` |
-| `FARGATE_LOG_GROUP` | `terraform output -raw log_group` |
-| `FARGATE_REGION` | `terraform output -raw region` |
+**Prerequisites for cloud:** AWS CLI configured (`aws configure`), Terraform, jq.
 
-If any env var is missing, SandboxShift silently falls back to local-only mode.
-
-Full walkthrough: [docs/getting-started.md#cloud-burst-setup](docs/getting-started.md#cloud-burst-setup)
+Full walkthrough: [docs/getting-started.md](docs/getting-started.md)
 
 ---
 
@@ -180,24 +192,25 @@ Full walkthrough: [docs/getting-started.md#cloud-burst-setup](docs/getting-start
 
 ---
 
-## API Reference
+## CLI Reference
 
 ```bash
 # Run a task
-POST /run
-{
-  "workspace": "/path/to/project",
-  "task": "pytest tests/",
-  "mode": "auto",          # optional
-  "allowed_hosts": ["pypi.org"],  # optional
-  "timeout_seconds": 1800  # optional
-}
+sandboxshift run <workspace> <task> [options]
+  --port PORT|HOST:CONTAINER   Expose a port (repeat for multiple)
+  --allow FQDN                 Allow outbound to this domain (repeat for multiple)
+  --timeout N                  Kill after N seconds (default: 1800)
+  --memory-mb N                Memory limit in MB (default: 512)
+  --cpu N                      CPU limit (default: 1.0)
+  --setup CMD                  Run this command before the task
+  --skip-sensitivity-check     Skip sensitive data scan
+  --ram-threshold N            Burst to cloud if local RAM below N MB
 
-# Health check
-GET /health
+# Stop a running cloud server
+sandboxshift stop <instance_id>
 
-# Audit log (last N entries)
-GET /audit?limit=50
+# View audit log
+sandboxshift audit tail [--lines N]
 ```
 
 ---
@@ -216,7 +229,7 @@ GET /audit?limit=50
 - [x] Python CLI (`sandboxshift run`)
 - [x] Pre-built runtime images (python, node, multi)
 - [x] Terraform AWS setup
-- [x] README and getting started docs
+- [x] One-script setup (`sandboxshift-setup.sh`)
 
 ### V2 — Next
 - [ ] gVisor integration (Layer 3)
