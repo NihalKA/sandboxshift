@@ -194,7 +194,7 @@ resource "aws_iam_role_policy" "task_s3" {
   })
 }
 
-# ── Security Group for Fargate Tasks ─────────────────────────────────────────
+# ── Security Group for Fargate Tasks (batch mode) ─────────────────────────────
 
 resource "aws_security_group" "sandbox_task" {
   name        = "${var.cluster_name}-sandbox-task"
@@ -212,7 +212,35 @@ resource "aws_security_group" "sandbox_task" {
     }
   }
 
-  # No ingress rules — Fargate tasks are outbound-only
+  # No ingress rules — batch tasks are outbound-only
+  tags = local.common_tags
+}
+
+# ── Security Group for Server-Mode Tasks (ports exposed) ─────────────────────
+#
+# Only attached when the user configures ports: in sandboxshift.yaml or via
+# the --port CLI flag. Allows ALL TCP inbound so the task's public IP is
+# reachable on any configured port. FargateRuntime appends this SG to the
+# task's security groups in server mode; batch tasks never use it.
+#
+# The broad ingress is intentional and documented — server mode is an explicit
+# opt-in (requires ports: config). Security Layer 4 (egress allowlist) is
+# still enforced via sandbox_task SG which is always present.
+
+resource "aws_security_group" "sandbox_server_task" {
+  name        = "${var.cluster_name}-sandbox-server"
+  description = "ALL TCP inbound for SandboxShift server-mode Fargate tasks"
+  vpc_id      = var.use_default_vpc ? data.aws_vpc.default[0].id : var.vpc_id
+
+  ingress {
+    description = "All TCP inbound — server mode only (explicit opt-in)"
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Egress handled by sandbox_task SG (always present alongside this one)
   tags = local.common_tags
 }
 
