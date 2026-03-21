@@ -27,6 +27,12 @@ the container uses slirp4netns without --dns=none and without any
 --add-host entries, giving full outbound internet access. This intentionally
 disables Security Layer 4 and is recorded as a network_unrestricted_mode
 audit event with an explicit warning.
+
+HOME=/tmp is always injected (Decision #56). The sandboxshift user's home
+directory in the image may be /workspace (old images) or /home/sandboxshift
+(new images). In both cases, HOME=/tmp ensures pip user-installs and other
+tools that write to ~ always land in a writable location — even when the
+workspace is mounted :ro. /tmp is always writable inside the container.
 """
 
 from __future__ import annotations
@@ -63,8 +69,9 @@ _MARKER_IMAGES: dict[str, str] = {
 }
 
 # Pip package cache — persisted on the host across container runs.
-# Container path matches the sandboxshift nonroot user (UID 10000) home.
-_PIP_CACHE_CONTAINER_PATH: str = "/home/sandboxshift/.cache/pip"
+# Mounted at /tmp/.cache/pip inside the container, matching HOME=/tmp
+# so pip finds the cache regardless of which image variant is in use.
+_PIP_CACHE_CONTAINER_PATH: str = "/tmp/.cache/pip"
 
 
 def _pip_cache_host_path() -> Path:
@@ -284,6 +291,10 @@ class PodmanRuntime(Runtime):
         ``--entrypoint /bin/sh`` is always passed (Decision #53) so the task
         runs via /bin/sh regardless of the ENTRYPOINT baked into the image.
 
+        ``HOME=/tmp`` is always injected (Decision #56) so pip user-installs
+        and other tools that write to ~ land in /tmp regardless of the home
+        directory baked into the image. This makes workspace :ro mounts safe.
+
         Args:
             instance_id: Returned by provision().
             task:        Shell command string, wrapped in /bin/sh -c.
@@ -327,6 +338,9 @@ class PodmanRuntime(Runtime):
         # --entrypoint /bin/sh overrides any ENTRYPOINT set by the base image
         # (Decision #53). Ensures the task always runs via /bin/sh -c regardless
         # of what the image's ENTRYPOINT is set to.
+        #
+        # HOME=/tmp (Decision #56): pip user-installs and other tools that write
+        # to ~ will use /tmp which is always writable, even when workspace is :ro.
         cmd: list[str] = [
             "podman",
             "run",
@@ -335,6 +349,8 @@ class PodmanRuntime(Runtime):
             "--rm",
             "--user",
             _NONROOT_USER,
+            "--env",
+            "HOME=/tmp",
             "--cpus",
             str(state.config.cpu_limit),
             "--memory",
