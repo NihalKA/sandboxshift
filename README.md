@@ -45,18 +45,19 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 | Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
 | AWS CLI v2 | cloud burst only | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
 
-**Everything else (Terraform, jq) is downloaded and managed by the setup script.**
+**Everything else (Terraform) is downloaded and managed by the setup script.**
 
 ```bash
 git clone https://github.com/NihalKA/sandboxshift
 cd sandboxshift
 chmod +x sandboxshift-setup.sh
 
-# Local mode only (no AWS needed)
-./sandboxshift-setup.sh local
+# Recommended — auto-detects: cloud if AWS credentials present, local otherwise
+./sandboxshift-setup.sh
 
-# Local + cloud burst
-./sandboxshift-setup.sh cloud
+# Or explicitly:
+./sandboxshift-setup.sh local   # local Podman only, no AWS needed
+./sandboxshift-setup.sh cloud   # local + full cloud burst setup
 ```
 
 The setup script:
@@ -66,7 +67,7 @@ The setup script:
 4. Builds all runtime images into Podman
 5. *(cloud only)* Creates ECR repo, pushes image, runs `terraform apply`, writes `~/.sandboxshift/fargate.env`
 
-Then add the bin dir to your PATH:
+Then add the bin dir to your PATH (the script will remind you if it's not set):
 ```bash
 echo 'export PATH="$HOME/.sandboxshift/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
