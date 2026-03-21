@@ -60,6 +60,25 @@ _SERVER_START_TIMEOUT_SECONDS: int = 300             # 5 min to reach RUNNING
 _LOG_STREAM_WAIT_ATTEMPTS: int = 7                   # 7 x 5s = 35s max wait
 _LOG_TAIL_POLL_SECONDS: float = 2.0                  # CloudWatch poll interval
 
+# Directory names that are NEVER uploaded to S3. (Decision #58)
+# All of these are generated/installed inside the container by _S3_DEPS_BOOTSTRAP
+# (npm install / pip install). Uploading them wastes bandwidth, can exceed the
+# 500 MB cap, and was the root cause of the "6000 files" hang on a Node project.
+_SKIP_DIR_PARTS: frozenset[str] = frozenset({
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "target",    # Rust / Maven
+    ".tox",
+    ".eggs",
+})
+
 _MARKER_IMAGES: dict[str, str] = {
     "requirements.txt": "sandboxshift/runtime-python:3.11",
     "package.json":     "sandboxshift/runtime-node:20",
@@ -254,8 +273,9 @@ class FargateRuntime(Runtime):
         """Provision a cloud sandbox.
 
         Uploads workspace files to the persistent S3 bucket under a unique
-        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames
-        and the .git directory (git history is irrelevant inside the container).
+        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames,
+        generated dependency directories (node_modules, __pycache__, .venv, etc.),
+        and the .git directory.
 
         Args:
             workspace: Local directory to stage to S3. Must exist.
@@ -266,36 +286,50 @@ class FargateRuntime(Runtime):
 
         Raises:
             FileNotFoundError: If workspace does not exist.
-            ValueError:        If workspace exceeds 500 MB.
+            ValueError:        If workspace exceeds 500 MB (after filtering).
             RuntimeError:      If S3 upload fails.
         """
         if not workspace.exists():
             raise FileNotFoundError(f"workspace does not exist: {workspace}")
 
-        total = sum(f.stat().st_size for f in workspace.rglob("*") if f.is_file())
-        if total > _MAX_WORKSPACE_BYTES:
-            raise ValueError(f"workspace exceeds 500 MB limit: {total} bytes")
-
         instance_id = f"ss-{uuid.uuid4().hex[:12]}"
         # S3 prefix for this run — trailing slash is intentional
         s3_prefix = f"workspace/{instance_id}/"
 
+        # Build upload list — skip generated/dependency directories and sensitive
+        # filenames. node_modules / __pycache__ / .venv etc. are installed inside
+        # the container by _S3_DEPS_BOOTSTRAP; uploading them is pure waste.
         files = [
             f
             for f in workspace.rglob("*")
             if f.is_file()
             and not _sensitive_filename(f.name)
-            and ".git" not in f.relative_to(workspace).parts
+            and _SKIP_DIR_PARTS.isdisjoint(f.relative_to(workspace).parts)
         ]
-        _step(f"Uploading {len(files)} workspace file(s) to S3 ...")
-        for f in files:
+
+        # Size check runs on the filtered list (consistent with what is uploaded).
+        total = sum(f.stat().st_size for f in files)
+        if total > _MAX_WORKSPACE_BYTES:
+            raise ValueError(f"workspace exceeds 500 MB limit: {total} bytes")
+
+        n = len(files)
+        _step(f"Uploading {n} workspace file(s) to S3 ...")
+        for i, f in enumerate(files, 1):
+            print(
+                f"\r{_C_BLUE}[sandboxshift]{_C_RESET}"
+                f"  {i}/{n} \u2014 {f.name:<45}",
+                end="",
+                flush=True,
+            )
             try:
                 await asyncio.to_thread(
                     self._upload_file, self._workspace_bucket, s3_prefix, workspace, f
                 )
             except Exception as e:
+                print()  # end the \r line before raising
                 raise RuntimeError(f"S3 upload failed for {f}: {e}") from e
-        _ok("Workspace uploaded")
+        print()  # end the \r progress line
+        _ok(f"Workspace uploaded ({n} files, {total // 1024} KB)")
 
         image = _detect_image(workspace)  # audit-only
         is_server = bool(config.ports)
@@ -901,16 +935,16 @@ class FargateRuntime(Runtime):
         except Exception:  # noqa: BLE001
             pass
 
-    def _delete_s3_prefix(self, bucket_name: str, s3_prefix: str) -> None:
-        """Delete all S3 objects under the run's prefix. No-op if nothing exists."""
+    def _delete_s3_prefix(self, bucket: str, prefix: str) -> None:
+        """Delete all S3 objects under the given prefix. No-op if prefix is empty."""
+        if not prefix:
+            return
         s3 = self._session.client("s3", region_name=self._region)
-        try:
-            paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix):
-                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-                if objects:
-                    s3.delete_objects(
-                        Bucket=bucket_name, Delete={"Objects": objects}
-                    )
-        except Exception:  # noqa: BLE001
-            pass
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+            if objects:
+                s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": objects, "Quiet": True},
+                )
