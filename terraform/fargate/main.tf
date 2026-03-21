@@ -245,6 +245,11 @@ resource "aws_security_group" "sandbox_server_task" {
 }
 
 # ── ECS Task Definition ──────────────────────────────────────────────────────────
+#
+# Uses runtime-multi image which includes Python 3.11 + Node 20 + busybox.
+# This ensures both `python3`/`pip` and `node`/`npm` are available inside
+# the container for _S3_DEPS_BOOTSTRAP (pip install + npm install) and for
+# running Python or Node tasks. (Decision #48)
 
 resource "aws_ecs_task_definition" "sandbox" {
   family                   = var.task_family
@@ -257,7 +262,7 @@ resource "aws_ecs_task_definition" "sandbox" {
 
   container_definitions = jsonencode([{
     name      = "sandbox"
-    image     = "${var.ecr_registry}/sandboxshift/runtime-python:3.11"
+    image     = "${var.ecr_registry}/sandboxshift/runtime-multi:latest"
     essential = true
 
     # entryPoint is set here in the task definition (not overrideable at
