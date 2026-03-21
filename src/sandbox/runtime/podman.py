@@ -33,6 +33,10 @@ directory in the image may be /workspace (old images) or /home/sandboxshift
 (new images). In both cases, HOME=/tmp ensures pip user-installs and other
 tools that write to ~ always land in a writable location — even when the
 workspace is mounted :ro. /tmp is always writable inside the container.
+
+PORT env var is injected when ports are configured (Decision #57). This
+lets apps read process.env.PORT (Node) or $PORT (shell/Python) without
+hardcoding the port number. Uses the first configured container port.
 """
 
 from __future__ import annotations
@@ -295,6 +299,10 @@ class PodmanRuntime(Runtime):
         and other tools that write to ~ land in /tmp regardless of the home
         directory baked into the image. This makes workspace :ro mounts safe.
 
+        ``PORT=<container_port>`` is injected when ports are configured
+        (Decision #57). Apps can read process.env.PORT (Node) or $PORT
+        without hardcoding the port number.
+
         Args:
             instance_id: Returned by provision().
             task:        Shell command string, wrapped in /bin/sh -c.
@@ -334,6 +342,10 @@ class PodmanRuntime(Runtime):
         port_flags: list[str] = []
         for h, c in state.config.ports:
             port_flags.extend(["-p", f"127.0.0.1:{h}:{c}"])
+        # Inject PORT env var so apps can read process.env.PORT / $PORT without
+        # hardcoding the port number (Decision #57). Uses the first container port.
+        if state.config.ports:
+            port_flags.extend(["--env", f"PORT={state.config.ports[0][1]}"])
 
         # --entrypoint /bin/sh overrides any ENTRYPOINT set by the base image
         # (Decision #53). Ensures the task always runs via /bin/sh -c regardless

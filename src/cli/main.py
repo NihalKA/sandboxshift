@@ -167,11 +167,30 @@ def _validate_allow_hosts(hosts: list[str]) -> None:
 
 
 def _parse_port(port_str: str) -> tuple[int, int]:
-    """Parse 'HOST:CONTAINER' string. Raises ValueError on invalid input."""
+    """Parse port string. Accepts bare PORT or HOST:CONTAINER format.
+
+    Bare port (e.g. '3000') expands to (3000, 3000) — same host and container port.
+    HOST:CONTAINER (e.g. '8080:3000') maps host 8080 to container 3000.
+
+    Raises ValueError on invalid input.
+    """
     parts = port_str.split(":")
+    if len(parts) == 1:
+        # Bare port number — expand to HOST:CONTAINER both equal.
+        try:
+            port = int(parts[0])
+        except ValueError:
+            raise ValueError(
+                f"Invalid port '{port_str}': must be an integer (e.g. 3000) "
+                f"or HOST:CONTAINER (e.g. 8080:3000)"
+            )
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Port {port} out of valid range (1-65535)")
+        return (port, port)
     if len(parts) != 2:
         raise ValueError(
-            f"Invalid port format '{port_str}': expected HOST:CONTAINER (e.g. 8000:8000)"
+            f"Invalid port format '{port_str}': expected PORT or HOST:CONTAINER "
+            f"(e.g. 3000 or 8080:3000)"
         )
     try:
         host, container = int(parts[0]), int(parts[1])
@@ -476,8 +495,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="ports",
         action="append",
         default=[],
-        metavar="HOST:CONTAINER",
-        help="Expose container port to host (e.g. 8000:8000). Repeat for multiple.",
+        metavar="PORT|HOST:CONTAINER",
+        help="Expose container port (e.g. 3000 or 8080:3000). Repeat for multiple.",
     )
     run_parser.add_argument(
         "--ram-threshold",
