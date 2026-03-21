@@ -84,7 +84,7 @@ sandboxshift run /path/to/your/project "pytest tests/"
 # Run a Node.js server (local)
 sandboxshift run /path/to/node-app "node index.js" --port 3000
 
-# Force cloud burst (Fargate)
+# Force cloud burst to Fargate
 sandboxshift run /path/to/project "python main.py" --ram-threshold 999999
 
 # Run a cloud server and tail logs live
@@ -155,29 +155,51 @@ Images are built locally into Podman by `sandboxshift-setup.sh`. For cloud burst
 
 ## Configuration
 
-Create `sandboxshift.yaml` in your project root:
+Place `sandboxshift.yaml` in your **workspace root** (the same directory you pass to `sandboxshift run`). It is loaded automatically — no flag needed.
+
+```
+sandboxshift run /path/to/my-project "node index.js"
+                 └── looks for /path/to/my-project/sandboxshift.yaml
+```
+
+Full example with every supported key:
 
 ```yaml
+# sandboxshift.yaml — place in your workspace root
+
 sandbox:
-  runtime: auto       # auto, local, or cloud
-  timeout: 1800       # seconds before killing sandbox
+  timeout: 1800              # kill sandbox after this many seconds (default: 1800)
+  setup: "npm ci"            # run this before your main task (e.g. install deps)
+  skip_sensitivity_check: false  # set true to bypass secret scanning (use with caution)
 
 workspace:
-  mount: ./src        # only this directory is visible to agent
+  readonly: false            # true = workspace mounted read-only inside container
 
 network:
   allow:
-    - pypi.org
+    - pypi.org               # FQDNs the container can reach outbound
+    - npmjs.com
     - api.github.com
-  block_all_others: true
+  # Use ["*"] to allow ALL outbound traffic — disables Security Layer 4
+  # allow:
+  #   - "*"
 
 resources:
-  cpu: 2
-  memory: 4GB
+  cpu: 2                     # CPU cores allocated to the container (default: 2.0)
+  memory: 4GB                # container RAM cap — also accepts "4096MB" or 4096 (MB int)
+  min_cpu: 4                 # if local machine has fewer than 4 CPUs → force cloud (hard requirement)
+  min_memory: 8GB            # if local available RAM < 8GB → force cloud (hard requirement)
 
-sensitivity:
-  level: auto         # auto-detect sensitive data
+ports:
+  - 3000:3000                # HOST:CONTAINER — expose container port 3000 on host port 3000
+  - 8080:80                  # HOST:CONTAINER — expose container port 80 on host port 8080
 ```
+
+**Key facts:**
+- **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
+- `resources.min_cpu` / `resources.min_memory` are **hard requirements** — if not met locally, cloud is forced regardless of `--ram-threshold`
+- `resources.cpu` / `resources.memory` are **container limits** (cgroup caps), not burst triggers
+- `network.allow` with `["*"]` disables the outbound allowlist entirely — use only for trusted workspaces
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
@@ -202,36 +224,71 @@ Full walkthrough: [docs/getting-started.md](docs/getting-started.md)
 
 ---
 
-## Deployment Modes
-
-| Mode | When To Use |
-|------|-------------|
-| `auto` | Smart switching — default; BurstEngine decides based on RAM |
-| `local` | Always run on your machine |
-| `cloud` | Always run on your Fargate |
-
----
-
 ## CLI Reference
 
 ```bash
-# Run a task
 sandboxshift run <workspace> <task> [options]
-  --port PORT|HOST:CONTAINER   Expose a port (repeat for multiple)
-  --allow FQDN                 Allow outbound to this domain (repeat for multiple)
-  --timeout N                  Kill after N seconds (default: 1800)
-  --memory-mb N                Memory limit in MB (default: 512)
-  --cpu N                      CPU limit (default: 1.0)
-  --setup CMD                  Run this command before the task
-  --skip-sensitivity-check     Skip sensitive data scan
-  --ram-threshold N            Burst to cloud if local RAM below N MB
+```
 
-# Stop a running cloud server
+`<workspace>` is the directory to mount. `sandboxshift.yaml` is loaded from that directory automatically if present.
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port PORT` | — | Expose a port. Accepts bare `3000` (maps 3000→3000) or `HOST:CONTAINER` e.g. `8080:3000`. Repeat for multiple ports. Combined with YAML `ports:`. |
+| `--allow FQDN` | — | Allow outbound to this domain. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. |
+| `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. |
+| `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
+| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Overrides YAML `resources.memory`. |
+| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Overrides YAML `resources.cpu`. |
+| `--ram-threshold N` | `1024` | **Burst trigger (MB).** If available host RAM < N MB, burst to cloud. Default is 1024 MB (1 GB). Use `999999` to always burst, `0` to never burst. |
+| `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
+| `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
+
+### Controlling local vs cloud
+
+| Intent | Command |
+|--------|---------|
+| Auto (default) — local if RAM ≥ 1 GB, else cloud | `sandboxshift run /workspace "task"` |
+| Always burst to cloud | `sandboxshift run /workspace "task" --ram-threshold 999999` |
+| Always stay local | `sandboxshift run /workspace "task" --ram-threshold 0` |
+| Hard cloud requirement via YAML | Set `resources.min_memory: 8GB` in `sandboxshift.yaml` |
+
+> **Note:** `--ram-threshold` compares against **available** RAM right now (not total installed RAM). On a 16 GB machine with many apps open, available might be 4–6 GB.
+
+### Other commands
+
+```bash
+# Stop a running cloud server task
 sandboxshift stop <instance_id>
 
-# View audit log
-sandboxshift audit tail [--lines N]
+# View the last 20 audit log entries
+sandboxshift audit tail
+
+# View the last N entries
+sandboxshift audit tail -n 50
+
+# Use a custom audit log path
+sandboxshift audit tail --audit-log /tmp/my-audit.log
 ```
+
+### YAML vs CLI precedence
+
+| Setting | YAML key | CLI flag | Priority |
+|---------|----------|----------|----------|
+| Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
+| Setup command | `sandbox.setup` | `--setup` | CLI wins |
+| Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
+| Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely |
+| CPU limit | `resources.cpu` | `--cpu` | CLI wins |
+| Memory limit | `resources.memory` | `--memory-mb` | CLI wins |
+| Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
+| Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
+| Min CPU (burst) | `resources.min_cpu` | no CLI flag | YAML only |
+| Min memory (burst) | `resources.min_memory` | no CLI flag | YAML only |
+| Burst threshold | no YAML key | `--ram-threshold` | CLI only |
+| Audit log path | no YAML key | `--audit-log` | CLI / env var only |
 
 ---
 
