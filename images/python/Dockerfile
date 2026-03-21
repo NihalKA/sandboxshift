@@ -1,19 +1,17 @@
 # sandboxshift/runtime-python:3.11
 # -----------------------------------------------------------------------
-# Chainguard Python 3.11 sandbox runtime for SandboxShift.
+# Python 3.11 sandbox runtime for SandboxShift.
 #
-# Security properties (AGENTS.md Security Architecture):
-#   Layer 1: Chainguard base — zero known CVEs, SBOM-signed supply chain
-#   Layer 2: Non-root user — UID 65532 (Chainguard nonroot)
+# Base: python:3.11-slim (Docker Hub official)
+#   - Always publicly available, no auth required
+#   - Pinned to Python 3.11 (not floating latest)
+#   - Debian slim: ~50MB, has /bin/sh, pip, apt
 #
-# Why :latest-dev (not :latest):
-#   PodmanRuntime unconditionally runs tasks as `/bin/sh -c <task>`.
-#   The distroless :latest variant has no shell and would fail every task.
-#   The :latest-dev variant adds BusyBox (/bin/sh) and apk. Network egress
-#   is controlled by PodmanRuntime allowlist (Decision #18), not image contents.
+# Security properties:
+#   Layer 2: Non-root user (sandboxshift, UID 10000)
 # -----------------------------------------------------------------------
 
-FROM cgr.dev/chainguard/python:latest-dev
+FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="sandboxshift/runtime-python" \
       org.opencontainers.image.version="3.11" \
@@ -24,13 +22,13 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-python" \
 # (--volume {workspace}:/workspace --workdir /workspace)
 WORKDIR /workspace
 
-# Install uv package manager at build time (runs as root — lands in /usr/local/bin).
-# Available to UID 65532 at runtime for dependency installation (uv sync, uv pip install).
+# Install uv package manager at build time.
+# Available to the sandbox user at runtime for fast dependency installation.
 RUN pip install --no-cache-dir uv
 
-# Chainguard nonroot — matches _NONROOT_USER = "65532:65532" in podman.py.
-# PodmanRuntime also passes --user 65532:65532 explicitly; this is defence-in-depth.
-USER 65532:65532
+# Create a non-root user for runtime execution.
+# UID 10000 is used consistently across all SandboxShift runtime images.
+RUN groupadd -g 10000 sandboxshift \
+ && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift
 
-# No CMD/ENTRYPOINT — PodmanRuntime passes the full command:
-#   podman run ... <image> /bin/sh -c <task>
+USER 10000:10000

@@ -1,13 +1,17 @@
 # sandboxshift/runtime-node:20
 # -----------------------------------------------------------------------
-# Chainguard Node 20 sandbox runtime for SandboxShift.
+# Node 20 sandbox runtime for SandboxShift.
 #
-# Same security rationale as runtime-python — see images/python/Dockerfile.
-# :latest-dev is required for /bin/sh (BusyBox).
-# Selected when workspace contains package.json only (no requirements.txt).
+# Base: node:20-slim (Docker Hub official)
+#   - Always publicly available, no auth required
+#   - Pinned to Node 20 LTS
+#   - Debian slim: has /bin/sh, npm
+#
+# Security properties:
+#   Layer 2: Non-root user (sandboxshift, UID 10000)
 # -----------------------------------------------------------------------
 
-FROM cgr.dev/chainguard/node:latest-dev
+FROM node:20-slim
 
 LABEL org.opencontainers.image.title="sandboxshift/runtime-node" \
       org.opencontainers.image.version="20" \
@@ -16,9 +20,8 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-node" \
 
 WORKDIR /workspace
 
-# Node projects use npm/yarn/pnpm — no Python tooling needed here.
-# uv (Python package manager) is available in runtime-python and runtime-multi.
-# The Chainguard node image locks its APK database, so apk add is not used.
+# Create a non-root user for runtime execution.
+RUN groupadd -g 10000 sandboxshift \
+ && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift
 
-# UID 65532 — Chainguard nonroot; matches _NONROOT_USER in podman.py.
-USER 65532:65532
+USER 10000:10000

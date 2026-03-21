@@ -2,42 +2,39 @@
 # -----------------------------------------------------------------------
 # Combined Python 3.11 + Node 20 sandbox runtime for SandboxShift.
 # Used when _detect_image() finds multiple workspace markers.
-# (Decision #19 — multiple markers → runtime-multi)
+# (Decision #19 — multiple markers -> runtime-multi)
 #
-# Base: cgr.dev/chainguard/wolfi-base
-#   Wolfi is the upstream distro for all Chainguard images.
-#   Using wolfi-base + apk installs both runtimes without fragile
-#   cross-image COPY --from operations.
-#
-#   python-3.11 and nodejs-20 are the pinned APK package names in Wolfi.
-#   busybox is required so /bin/sh is available for PodmanRuntime's
-#   `podman run ... /bin/sh -c <task>` invocation.
+# Base: python:3.11-slim (Docker Hub official)
+#   - Always publicly available, no auth required
+#   - Node 20 installed via NodeSource apt repository (official)
 #
 # Security properties:
-#   Layer 1: Wolfi/Chainguard base — zero CVEs, SBOM-signed
-#   Layer 2: Non-root UID 65532 — matches _NONROOT_USER in podman.py
-#
-# V2 note: multi-stage strip of apk from the final layer is planned.
-#   Network egress is allowlist-controlled by PodmanRuntime (Decision #18),
-#   so apk cannot reach the internet unless the operator explicitly allows it.
+#   Layer 2: Non-root user (sandboxshift, UID 10000)
 # -----------------------------------------------------------------------
 
-FROM cgr.dev/chainguard/wolfi-base
+FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="sandboxshift/runtime-multi" \
       org.opencontainers.image.version="latest" \
       org.opencontainers.image.description="SandboxShift multi-runtime (Python 3.11 + Node 20)" \
       org.opencontainers.image.vendor="SandboxShift"
 
-# Install both runtimes + busybox shell (provides /bin/sh for PodmanRuntime) + uv.
-RUN apk add --no-cache \
-        python-3.11 \
-        nodejs-20 \
-        busybox \
-        uv \
-    && rm -rf /var/cache/apk/*
+# Install Node 20 via NodeSource official apt repo, then clean up.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && apt-get remove -y curl gnupg \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast Python dependency management.
+RUN pip install --no-cache-dir uv
 
 WORKDIR /workspace
 
-# Chainguard nonroot UID — matches _NONROOT_USER = "65532:65532" in podman.py.
-USER 65532:65532
+# Create a non-root user for runtime execution.
+RUN groupadd -g 10000 sandboxshift \
+ && useradd -u 10000 -g 10000 -s /bin/sh -d /workspace sandboxshift
+
+USER 10000:10000
