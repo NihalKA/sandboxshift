@@ -45,7 +45,7 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 | Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
 | AWS CLI v2 | cloud burst only | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
 
-**Everything else (Terraform) is downloaded and managed by the setup script.**
+**Everything else (Terraform, pip install, venv) is handled automatically by the setup script.**
 
 ```bash
 git clone https://github.com/NihalKA/sandboxshift
@@ -60,17 +60,19 @@ chmod +x sandboxshift-setup.sh
 ./sandboxshift-setup.sh cloud   # local + full cloud burst setup
 ```
 
-The setup script:
+The setup script does all of this automatically — you run nothing else:
 1. Downloads pinned **Terraform 1.5.7** into `~/.sandboxshift/bin/` — never touches your system Terraform
 2. Creates an **isolated Python venv** at `~/.sandboxshift/venv/` — your global Python env stays clean
-3. Symlinks the CLI to `~/.sandboxshift/bin/sandboxshift`
-4. Builds all runtime images into Podman
-5. *(cloud only)* Creates ECR repo, pushes image, runs `terraform apply`, writes `~/.sandboxshift/fargate.env`
+3. Runs **`pip install -e .`** inside that venv — installs sandboxshift without touching your system Python
+4. Symlinks the CLI to `~/.sandboxshift/bin/sandboxshift`
+5. Builds all runtime images into Podman (`runtime-python`, `runtime-node`, `runtime-multi`)
+6. *(cloud only)* Creates ECR repo, pushes image, runs `terraform apply`, writes `~/.sandboxshift/fargate.env`
 
-Then add the bin dir to your PATH (the script will remind you if it's not set):
+**One-time PATH setup** (the script will print this reminder if needed):
 ```bash
 echo 'export PATH="$HOME/.sandboxshift/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
+After this, `sandboxshift` works in every terminal. You never need to activate a venv or set env vars manually.
 
 ---
 
