@@ -8,7 +8,6 @@
 [![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg)](https://fastapi.tiangolo.com)
 [![Podman](https://img.shields.io/badge/runtime-Podman-892CA0.svg)](https://podman.io)
-[![Chainguard](https://img.shields.io/badge/images-Chainguard-FF6B35.svg)](https://chainguard.dev)
 
 </div>
 
@@ -130,7 +129,7 @@ Defence in depth — every layer adds independent protection:
 
 | Layer | What It Does |
 |-------|-------------|
-| 1. Chainguard base image | Zero-CVE base images, rebuilt nightly |
+| 1. Hardened base image | Official slim images, non-root user (UID 10000), minimal packages |
 | 2. Podman rootless | No root daemon, no privilege escalation |
 | 3. gVisor syscall interception | Intercepts every system call (V2) |
 | 4. Network policy | Default deny-all, explicit FQDN whitelist only |
@@ -254,6 +253,7 @@ sandboxshift audit tail [--lines N]
 
 ### V2 — Next
 - [ ] gVisor integration (Layer 3)
+- [ ] Chainguard base images (zero-CVE, SBOM)
 - [ ] Mid-execution migration with checkpoints
 - [ ] MCP server (Claude Desktop, Cursor integration)
 - [ ] LLM-based sensitivity classifier
