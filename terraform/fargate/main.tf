@@ -233,7 +233,7 @@ resource "aws_security_group" "sandbox_server_task" {
   vpc_id      = var.use_default_vpc ? data.aws_vpc.default[0].id : var.vpc_id
 
   ingress {
-    description = "All TCP inbound — server mode only (explicit opt-in)"
+    description = "All TCP inbound - server mode only (explicit opt-in)"
     from_port   = 0
     to_port     = 65535
     protocol    = "tcp"
