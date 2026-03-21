@@ -1,9 +1,9 @@
-"""BurstEngine \u2014 decides whether to run a sandbox task locally or burst to cloud.
+"""BurstEngine — decides whether to run a sandbox task locally or burst to cloud.
 
 BurstEngine is Step 2 in SandboxManager's pipeline. It consumes the SensitivityResult
 produced by SensitivityScanner and available system RAM to return an immutable
 BurstDecision. When SensitivityScanner sets recommendation=FORCE_LOCAL, BurstEngine
-must honour that unconditionally (Decision #9 \u2014 never re-open).
+must honour that unconditionally (Decision #9 — never re-open).
 
 get_available_ram_gb() and get_cpu_count() are module-level functions (not methods)
 so tests can patch them with unittest.mock.patch without monkey-patching psutil internals.
@@ -41,7 +41,7 @@ class BurstDecision:
 
     Attributes:
         mode:       "local" or "cloud"
-        reason:     Human-readable explanation \u2014 logged verbatim in the audit trail.
+        reason:     Human-readable explanation — logged verbatim in the audit trail.
         confidence: "forced" (cannot be overridden) or "preferred" (advisory, CLI can
                     override in V2).
     """
@@ -54,7 +54,7 @@ class BurstDecision:
 def get_available_ram_gb() -> float:
     """Return available system RAM in binary gigabytes.
 
-    Uses psutil.virtual_memory().available \u2014 the amount of RAM that can be given to
+    Uses psutil.virtual_memory().available — the amount of RAM that can be given to
     processes immediately without swapping, not total installed RAM.
 
     Raises:
@@ -89,35 +89,35 @@ class BurstEngine:
 
     Args:
         ram_threshold_gb: Minimum available RAM (in binary GB) required to run locally.
-                          Defaults to 4.0 GB. Configurable at construction time.
+                          Defaults to 1.0 GB. Configurable at construction time.
     """
 
-    def __init__(self, ram_threshold_gb: float = 4.0) -> None:
+    def __init__(self, ram_threshold_gb: float = 1.0) -> None:
         self._threshold = ram_threshold_gb
 
     async def decide(
         self,
         sensitivity_result: SensitivityResult,
-        workspace: Path,  # noqa: ARG002 \u2014 reserved for V2 feature parity with ADR-001
+        workspace: Path,  # noqa: ARG002 — reserved for V2 feature parity with ADR-001
         config: "SandboxConfig | None" = None,
     ) -> BurstDecision:
         """Return the burst decision for a sandbox task.
 
         Decision order (must not be changed):
-          1. If sensitivity_result says FORCE_LOCAL \u2192 always local, confidence=forced.
+          1. If sensitivity_result says FORCE_LOCAL → always local, confidence=forced.
           2. Read available RAM via asyncio.to_thread(get_available_ram_gb).
-             If psutil fails \u2192 local, confidence=forced (fail-closed).
+             If psutil fails → local, confidence=forced (fail-closed).
           3. If config.min_memory_mb_required > 0 and available RAM (MB) < requirement
-             \u2192 cloud, confidence=forced.
+             → cloud, confidence=forced.
           4. If config.min_cpu_required > 0 and local CPU count < requirement
-             \u2192 cloud, confidence=forced.
-             If CPU count read fails \u2192 cloud, confidence=forced (fail-closed).
-          5. If RAM >= threshold \u2192 local, confidence=preferred.
-          6. Otherwise \u2192 cloud, confidence=preferred.
+             → cloud, confidence=forced.
+             If CPU count read fails → cloud, confidence=forced (fail-closed).
+          5. If RAM >= threshold → local, confidence=preferred.
+          6. Otherwise → cloud, confidence=preferred.
 
         Args:
             sensitivity_result: Result from SensitivityScanner.scan().
-            workspace:          Workspace path \u2014 unused in V1, accepted for ADR-001
+            workspace:          Workspace path — unused in V1, accepted for ADR-001
                                 interface compatibility.
             config:             Optional sandbox config. When provided, min_cpu_required
                                 and min_memory_mb_required are checked (Decision #55).
@@ -125,7 +125,7 @@ class BurstEngine:
         Returns:
             BurstDecision with mode, reason, and confidence.
         """
-        # Step 1: sensitivity hard-stop \u2014 unconditional, no RAM read needed.
+        # Step 1: sensitivity hard-stop — unconditional, no RAM read needed.
         if sensitivity_result.recommendation == Recommendation.FORCE_LOCAL:
             return BurstDecision(
                 mode="local",
@@ -133,14 +133,14 @@ class BurstEngine:
                 confidence="forced",
             )
 
-        # Step 2: read available RAM (blocking call \u2192 offload to thread).
+        # Step 2: read available RAM (blocking call → offload to thread).
         try:
             available_gb = await asyncio.to_thread(get_available_ram_gb)
         except RuntimeError:
             # Fail-closed: unknown RAM state must never allow cloud execution.
             return BurstDecision(
                 mode="local",
-                reason="RAM read failed \u2014 defaulting to local",
+                reason="RAM read failed — defaulting to local",
                 confidence="forced",
             )
 
@@ -162,7 +162,7 @@ class BurstEngine:
             try:
                 cpu_count = await asyncio.to_thread(get_cpu_count)
             except RuntimeError:
-                # Fail-closed: unknown CPU count \u2192 cannot confirm requirement is met.
+                # Fail-closed: unknown CPU count → cannot confirm requirement is met.
                 return BurstDecision(
                     mode="cloud",
                     reason=(
