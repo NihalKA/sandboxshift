@@ -28,8 +28,9 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
+# Install boto3 for S3 workspace download bootstrap (used in Fargate mode).
 # Install uv for fast Python dependency management.
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir boto3 uv
 
 WORKDIR /workspace
 

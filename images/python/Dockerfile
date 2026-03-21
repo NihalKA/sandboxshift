@@ -22,9 +22,9 @@ LABEL org.opencontainers.image.title="sandboxshift/runtime-python" \
 # (--volume {workspace}:/workspace --workdir /workspace)
 WORKDIR /workspace
 
-# Install uv package manager at build time.
-# Available to the sandbox user at runtime for fast dependency installation.
-RUN pip install --no-cache-dir uv
+# Install boto3 for S3 workspace download bootstrap (used in Fargate mode).
+# Install uv package manager for fast Python dependency installation.
+RUN pip install --no-cache-dir boto3 uv
 
 # Create a non-root user for runtime execution.
 # UID 10000 is used consistently across all SandboxShift runtime images.

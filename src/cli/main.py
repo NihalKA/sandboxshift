@@ -49,6 +49,7 @@ _FARGATE_ENV_VARS: list[str] = [
     "FARGATE_SECURITY_GROUP_IDS",
     "FARGATE_LOG_GROUP",
     "FARGATE_REGION",
+    "FARGATE_WORKSPACE_BUCKET",
 ]
 
 # FQDN regex: requires at least two labels separated by dots.
@@ -194,6 +195,7 @@ def _build_fargate_runtime(audit_logger: AuditLogger) -> FargateRuntime | None:
         security_group_ids=values["FARGATE_SECURITY_GROUP_IDS"].split(","),
         region=values["FARGATE_REGION"],
         log_group=values["FARGATE_LOG_GROUP"],
+        workspace_bucket=values["FARGATE_WORKSPACE_BUCKET"],
         audit_logger=audit_logger,
     )
 
@@ -259,109 +261,97 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         min_cpu_required=min_cpu_required,
         min_memory_mb_required=min_memory_mb_required,
     )
+
     audit_log_path = _resolve_audit_log(args)
     audit_logger = AuditLogger(log_path=audit_log_path)
-    burst_engine = BurstEngine(ram_threshold_gb=args.ram_threshold)
-    local_runtime = PodmanRuntime(audit_logger=audit_logger)
-    cloud_runtime = _build_fargate_runtime(audit_logger)
-    scanner = SensitivityScanner()
+
+    fargate_runtime = _build_fargate_runtime(audit_logger)
+    podman_runtime = PodmanRuntime(audit_logger=audit_logger)
+    burst_engine = BurstEngine(
+        ram_threshold_mb=args.ram_threshold,
+        cpu_threshold=args.cpu_threshold if hasattr(args, "cpu_threshold") else 0,
+    )
+
     manager = SandboxManager(
-        local_runtime=local_runtime,
-        cloud_runtime=cloud_runtime,
+        local_runtime=podman_runtime,
+        cloud_runtime=fargate_runtime,
         burst_engine=burst_engine,
-        scanner=scanner,
+        scanner=SensitivityScanner(),
         audit_logger=audit_logger,
     )
+
     return await manager.run(workspace=workspace, task=args.task, config=config)
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
-    # Validate workspace path.
+    """Handle 'sandboxshift run' subcommand."""
+    _load_fargate_env()
     workspace = _validate_workspace(args.workspace)
 
-    # Validate --memory-mb bounds.
+    if args.allow:
+        _validate_allow_hosts(list(args.allow))
+
+    # Bounds check memory and cpu (CLI users bypass models.py constraints).
     if not (_MEMORY_MB_MIN <= args.memory_mb <= _MEMORY_MB_MAX):
         print(
-            f"Error: --memory-mb must be between {_MEMORY_MB_MIN} and {_MEMORY_MB_MAX}.",
+            f"Error: --memory-mb must be between {_MEMORY_MB_MIN} and {_MEMORY_MB_MAX}",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    # Validate --cpu bounds.
     if not (_CPU_MIN <= args.cpu <= _CPU_MAX):
         print(
-            f"Error: --cpu must be between {_CPU_MIN} and {_CPU_MAX}.",
+            f"Error: --cpu must be between {_CPU_MIN} and {_CPU_MAX}",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    # Validate --allow: FQDNs only, except "*" which enables unrestricted mode.
-    if args.allow:
-        _validate_allow_hosts(args.allow)
 
     try:
         result = asyncio.run(_run_async(args, workspace))
-    except SensitivityBlockedError as exc:
-        for reason in exc.findings:
-            print(f"[sensitive] {reason}", file=sys.stderr)
-        print(
-            "\nBlocked: workspace contains sensitive data.",
-            file=sys.stderr,
-        )
-        print(
-            "To run anyway: sandboxshift run ... --skip-sensitivity-check",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    except CloudRuntimeRequiredError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        print(
-            "\nTo fix: set FARGATE_CLUSTER_ARN, FARGATE_TASK_DEFINITION_ARN, "
-            "FARGATE_SUBNET_IDS, FARGATE_SECURITY_GROUP_IDS, FARGATE_LOG_GROUP, "
-            "FARGATE_REGION environment variables.",
-            file=sys.stderr,
-        )
-        print(
-            "Or remove min_cpu / min_memory from sandboxshift.yaml to run locally.",
-            file=sys.stderr,
-        )
+    except SensitivityBlockedError as e:
+        print(f"Blocked: {e}", file=sys.stderr)
+        sys.exit(2)
+    except CloudRuntimeRequiredError as e:
+        print(f"Cloud runtime required but not configured: {e}", file=sys.stderr)
+        sys.exit(3)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Runtime: {result.runtime_mode}")
+    print(f"Runtime: {result.runtime_used}")
     print(f"Duration: {result.duration_seconds:.2f}s")
-    print(f"Exit code: {result.task_result.exit_code}")
-    if result.task_result.stdout.strip():
-        print()
-        print(result.task_result.stdout, end="")
-    if result.task_result.stderr.strip():
-        print(result.task_result.stderr, end="", file=sys.stderr)
-    for reason in result.sensitivity_reasons:
-        print(f"[sensitive] {reason}")
-    sys.exit(result.task_result.exit_code)
+    print(f"Exit code: {result.exit_code}")
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+
+    sys.exit(result.exit_code)
 
 
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
-    # Resolve log path: --log arg → SANDBOXSHIFT_AUDIT_LOG env var → default
-    if args.log:
-        log_path = Path(args.log).expanduser()
-    else:
-        env_val = os.environ.get("SANDBOXSHIFT_AUDIT_LOG", "").strip()
-        log_path = Path(env_val).expanduser() if env_val else _DEFAULT_AUDIT_LOG
-    if not log_path.exists():
-        print(f"No audit log found at {log_path}")
+    """Handle 'sandboxshift audit tail' subcommand."""
+    _load_fargate_env()
+    audit_log_path = _resolve_audit_log(args)
+
+    if not audit_log_path.exists():
+        print(f"No audit log found at {audit_log_path}")
         return
+
     try:
-        text = log_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    lines = [line for line in text.splitlines() if line.strip()]
-    lines = lines[-args.n :]
-    for line in lines:
+        lines = audit_log_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        print(f"Error reading audit log: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    n = getattr(args, "lines", 20)
+    tail = lines[-n:] if len(lines) > n else lines
+
+    for line in tail:
         try:
             entry = json.loads(line)
             print(json.dumps(entry, indent=2))
         except json.JSONDecodeError:
-            pass
+            print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -371,88 +361,104 @@ def _cmd_audit_tail(args: argparse.Namespace) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sandboxshift",
-        description="Self-hosted AI agent sandbox with automatic local/cloud bursting.",
+        description="Run AI agent tasks in isolated sandboxes (local or cloud)",
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # --- run ---
-    run_p = subparsers.add_parser("run", help="Run a task inside a sandbox.")
-    run_p.add_argument("workspace", help="Path to workspace directory.")
-    run_p.add_argument("task", help="Shell command to run inside the sandbox.")
-    run_p.add_argument("--mode", choices=["local", "cloud", "auto"], default="auto")
-    run_p.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
-    run_p.add_argument("--memory-mb", type=int, default=4096, dest="memory_mb")
-    run_p.add_argument("--cpu", type=float, default=2.0)
-    run_p.add_argument(
-        "--allow",
-        nargs="*",
-        metavar="FQDN",
-        default=None,
-        help=(
-            "FQDNs the sandbox may connect to. Use '*' for unrestricted internet access "
-            "(disables Security Layer 4). Repeatable."
-        ),
+    # ── sandboxshift run ──────────────────────────────────────────────────
+    run_parser = subparsers.add_parser("run", help="Run a task in a sandbox")
+    run_parser.add_argument("workspace", help="Path to workspace directory")
+    run_parser.add_argument("task", help="Shell command to run")
+    run_parser.add_argument(
+        "--memory-mb",
+        dest="memory_mb",
+        type=int,
+        default=512,
+        help="Memory limit in MB (default: 512)",
     )
-    run_p.add_argument("--audit-log", default=None, dest="audit_log")
-    run_p.add_argument("--ram-threshold", type=float, default=4.0, dest="ram_threshold")
-    run_p.add_argument(
+    run_parser.add_argument(
+        "--cpu",
+        type=float,
+        default=1.0,
+        help="CPU limit (default: 1.0)",
+    )
+    run_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="Task timeout in seconds (default: 1800)",
+    )
+    run_parser.add_argument(
+        "--allow",
+        action="append",
+        default=[],
+        metavar="FQDN",
+        help="Allow outbound access to FQDN (repeat for multiple). Use '*' for unrestricted.",
+    )
+    run_parser.add_argument(
         "--setup",
         default=None,
-        metavar="CMD",
-        dest="setup",
-        help="Shell command to run before the main task (e.g. 'pip install -r requirements.txt').",
+        help="Setup command to run before the task",
     )
-    run_p.add_argument(
+    run_parser.add_argument(
         "--port",
-        metavar="HOST:CONTAINER",
-        action="append",
         dest="ports",
+        action="append",
         default=[],
-        help=(
-            "Expose container port to host as HOST:CONTAINER (e.g. --port 8000:8000)."
-            " Repeatable."
-        ),
+        metavar="HOST:CONTAINER",
+        help="Expose container port to host (e.g. 8000:8000). Repeat for multiple.",
     )
-    run_p.add_argument(
+    run_parser.add_argument(
+        "--ram-threshold",
+        dest="ram_threshold",
+        type=int,
+        default=4096,
+        help="Available RAM threshold in MB below which cloud bursting is triggered (default: 4096)",
+    )
+    run_parser.add_argument(
         "--skip-sensitivity-check",
+        dest="skip_sensitivity_check",
         action="store_true",
         default=False,
-        dest="skip_sensitivity_check",
-        help=(
-            "Skip the sensitive-data scan. Use only for workspaces you own and trust. "
-            "WARNING: disables Security Layer 6."
-        ),
+        help="Skip sensitive data detection (use with caution)",
     )
+    run_parser.add_argument(
+        "--audit-log",
+        dest="audit_log",
+        default=None,
+        help="Path to audit log file (default: ~/.sandboxshift/audit.log)",
+    )
+    run_parser.set_defaults(func=_cmd_run)
 
-    # --- audit ---
-    audit_p = subparsers.add_parser("audit", help="Work with audit logs.")
-    audit_sub = audit_p.add_subparsers(dest="audit_command", metavar="SUBCOMMAND")
-    tail_p = audit_sub.add_parser("tail", help="Show the last N audit log entries.")
-    tail_p.add_argument("--n", type=int, default=100, metavar="N")
-    tail_p.add_argument("--log", default=None, metavar="PATH")
+    # ── sandboxshift audit ────────────────────────────────────────────────
+    audit_parser = subparsers.add_parser("audit", help="Audit trail commands")
+    audit_subparsers = audit_parser.add_subparsers(dest="audit_command", required=True)
+
+    tail_parser = audit_subparsers.add_parser("tail", help="Show recent audit log entries")
+    tail_parser.add_argument(
+        "-n",
+        dest="lines",
+        type=int,
+        default=20,
+        help="Number of recent entries to show (default: 20)",
+    )
+    tail_parser.add_argument(
+        "--audit-log",
+        dest="audit_log",
+        default=None,
+        help="Path to audit log file (default: ~/.sandboxshift/audit.log)",
+    )
+    tail_parser.set_defaults(func=_cmd_audit_tail)
 
     return parser
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    # Auto-load ~/.sandboxshift/fargate.env before anything else.
-    # FARGATE_* vars are always overwritten (see _load_fargate_env docstring).
-    _load_fargate_env()
-
+    """Entry point for the sandboxshift CLI."""
     parser = _build_parser()
     args = parser.parse_args()
-    if args.command == "run":
-        _cmd_run(args)
-    elif args.command == "audit":
-        if getattr(args, "audit_command", None) == "tail":
-            _cmd_audit_tail(args)
-        else:
-            parser.parse_args(["audit", "--help"])
-            sys.exit(1)
-    else:
-        parser.print_help()
-        sys.exit(1)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

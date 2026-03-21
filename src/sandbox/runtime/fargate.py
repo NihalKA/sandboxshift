@@ -4,9 +4,11 @@ Runs agent tasks in the user's own AWS Fargate account. Never touches
 any shared SandboxShift infrastructure.
 
 Lifecycle:
-  provision()  →  create ephemeral S3 bucket, upload workspace, store state
-  execute()    →  launch ECS Fargate task, poll until STOPPED, fetch CloudWatch logs
-  destroy()    →  stop task, delete S3 bucket + objects, clear state
+  provision()  →  upload workspace to the persistent S3 bucket under a
+                  unique prefix (workspace/{instance_id}/), store state
+  execute()    →  launch ECS Fargate task; the injected command first downloads
+                  the workspace from S3 into /workspace, then runs the user task
+  destroy()    →  stop task, delete the workspace prefix from S3, clear state
 
 AWS credentials are read exclusively from the environment (IAM role, AWS_PROFILE,
 or AWS_ACCESS_KEY_ID env vars). Credentials are NEVER accepted as constructor
@@ -53,6 +55,25 @@ _C_BLUE   = "\033[0;34m"
 _C_GREEN  = "\033[0;32m"
 _C_YELLOW = "\033[1;33m"
 _C_RESET  = "\033[0m"
+
+# Python one-liner injected at the start of every ECS task command.
+# Downloads the workspace from S3 into /workspace before the user task runs.
+# Uses boto3 (installed in all SandboxShift runtime images) so no aws CLI needed.
+# SS_BUCKET, SS_PREFIX, SS_REGION are injected via containerOverrides environment.
+_S3_DOWNLOAD_BOOTSTRAP = (
+    "python3 -c \""
+    "import boto3, os, pathlib; "
+    "s3=boto3.client('s3',region_name=os.environ['SS_REGION']); "
+    "bucket=os.environ['SS_BUCKET']; "
+    "prefix=os.environ['SS_PREFIX']; "
+    "[("
+    "  pathlib.Path('/workspace'/pathlib.Path(o['Key'][len(prefix):]).parent).mkdir(parents=True,exist_ok=True),"
+    "  s3.download_file(bucket,o['Key'],'/workspace/'+o['Key'][len(prefix):])"
+    ") for page in boto3.client('s3',region_name=os.environ['SS_REGION'])"
+    ".get_paginator('list_objects_v2').paginate(Bucket=bucket,Prefix=prefix)"
+    " for o in page.get('Contents',[])"
+    "]\""
+)
 
 
 def _step(msg: str) -> None:
@@ -104,6 +125,7 @@ class _FargateInstanceState:
     """Internal state stored between provision() and execute()/destroy()."""
 
     bucket_name: str
+    s3_prefix: str      # e.g. "workspace/ss-abc123def456/"
     region: str
     cluster_arn: str
     task_def_arn: str
@@ -121,9 +143,14 @@ class FargateRuntime(Runtime):
     """V1 cloud sandbox runtime using AWS Fargate.
 
     Runs agent tasks inside the caller's own AWS ECS Fargate cluster.
-    Workspace files are staged to an ephemeral S3 bucket, the ECS task is
-    launched with command overrides, CloudWatch logs are fetched after
-    completion, and all AWS resources are cleaned up in destroy().
+    Workspace files are staged to a persistent S3 bucket under a unique
+    per-run prefix, the ECS task is launched with a bootstrap command that
+    downloads the workspace then runs the user task, CloudWatch logs are
+    fetched after completion, and the S3 prefix is cleaned up in destroy().
+
+    The S3 bucket (workspace_bucket) is created by Terraform and is reused
+    across all runs. This avoids per-run bucket creation/deletion and keeps
+    IAM simple — the task role only needs access to one known bucket.
 
     Args:
         cluster_arn:         ARN of the ECS cluster to run tasks in.
@@ -132,6 +159,7 @@ class FargateRuntime(Runtime):
         security_group_ids:  Security group IDs for the Fargate task.
         region:              AWS region (e.g. 'us-east-1').
         log_group:           CloudWatch Logs log group name.
+        workspace_bucket:    Name of the persistent S3 bucket for workspace staging.
         audit_logger:        Optional AuditLogger. Defaults to the V1 stub.
     """
 
@@ -143,6 +171,7 @@ class FargateRuntime(Runtime):
         security_group_ids: list[str],
         region: str,
         log_group: str,
+        workspace_bucket: str,
         audit_logger: AuditLogger | None = None,
     ) -> None:
         # Validate required string params
@@ -151,6 +180,7 @@ class FargateRuntime(Runtime):
             ("task_def_arn", task_def_arn),
             ("region", region),
             ("log_group", log_group),
+            ("workspace_bucket", workspace_bucket),
         ]:
             if not value:
                 raise ValueError(f"{param_name!r} must not be empty")
@@ -169,6 +199,7 @@ class FargateRuntime(Runtime):
         self._security_group_ids = security_group_ids
         self._region = region
         self._log_group = log_group
+        self._workspace_bucket = workspace_bucket
         self._audit = audit_logger if audit_logger is not None else AuditLogger()
         self._instances: dict[str, _FargateInstanceState] = {}
         # CRITICAL: called here so tests can patch boto3.Session before constructing.
@@ -181,8 +212,8 @@ class FargateRuntime(Runtime):
     async def provision(self, workspace: Path, config: SandboxConfig) -> str:
         """Provision a cloud sandbox.
 
-        Creates an ephemeral S3 bucket, uploads workspace files (skipping
-        sensitive filenames), and stores instance state.
+        Uploads workspace files to the persistent S3 bucket under a unique
+        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames.
 
         Args:
             workspace: Local directory to stage to S3. Must exist.
@@ -194,7 +225,7 @@ class FargateRuntime(Runtime):
         Raises:
             FileNotFoundError: If workspace does not exist.
             ValueError:        If workspace exceeds 500 MB.
-            RuntimeError:      If S3 bucket creation or upload fails.
+            RuntimeError:      If S3 upload fails.
         """
         if not workspace.exists():
             raise FileNotFoundError(f"workspace does not exist: {workspace}")
@@ -204,14 +235,8 @@ class FargateRuntime(Runtime):
             raise ValueError(f"workspace exceeds 500 MB limit: {total} bytes")
 
         instance_id = f"ss-{uuid.uuid4().hex[:12]}"
-        bucket_name = f"sandboxshift-{instance_id}"
-
-        _step(f"Creating S3 staging bucket: {bucket_name} ...")
-        try:
-            await asyncio.to_thread(self._create_bucket, bucket_name)
-        except Exception as e:
-            raise RuntimeError(f"S3 bucket creation failed: {e}") from e
-        _ok("S3 bucket ready")
+        # S3 prefix for this run — trailing slash is intentional
+        s3_prefix = f"workspace/{instance_id}/"
 
         files = [
             f
@@ -221,7 +246,9 @@ class FargateRuntime(Runtime):
         _step(f"Uploading {len(files)} workspace file(s) to S3 ...")
         for f in files:
             try:
-                await asyncio.to_thread(self._upload_file, bucket_name, workspace, f)
+                await asyncio.to_thread(
+                    self._upload_file, self._workspace_bucket, s3_prefix, workspace, f
+                )
             except Exception as e:
                 raise RuntimeError(f"S3 upload failed for {f}: {e}") from e
         _ok("Workspace uploaded")
@@ -229,7 +256,8 @@ class FargateRuntime(Runtime):
         image = _detect_image(workspace)  # audit-only
 
         self._instances[instance_id] = _FargateInstanceState(
-            bucket_name=bucket_name,
+            bucket_name=self._workspace_bucket,
+            s3_prefix=s3_prefix,
             region=self._region,
             cluster_arn=self._cluster_arn,
             task_def_arn=self._task_def_arn,
@@ -240,7 +268,8 @@ class FargateRuntime(Runtime):
         self._audit.record({
             "event": "provision",
             "instance_id": instance_id,
-            "bucket": bucket_name,
+            "bucket": self._workspace_bucket,
+            "s3_prefix": s3_prefix,
             "image_detected": image,
             "workspace": str(workspace),
             "network_allow": config.network_allow,
@@ -255,6 +284,12 @@ class FargateRuntime(Runtime):
         config: SandboxConfig,  # noqa: ARG002
     ) -> TaskResult:
         """Launch an ECS Fargate task and wait for it to complete.
+
+        The injected container command is:
+            <s3 download bootstrap> && <user task>
+
+        The bootstrap downloads the workspace from S3 into /workspace before
+        the user task runs. This is what makes files available in the container.
 
         Args:
             instance_id: Returned by provision().
@@ -314,8 +349,8 @@ class FargateRuntime(Runtime):
     async def destroy(self, instance_id: str) -> None:
         """Destroy the sandbox. Idempotent — never raises.
 
-        Stops the ECS task (if running), deletes all S3 objects, deletes the
-        S3 bucket, and removes the instance from internal state.
+        Stops the ECS task (if running), deletes the S3 prefix for this run,
+        and removes the instance from internal state.
 
         The audit record is written in the finally block to guarantee it is
         always emitted regardless of cleanup errors (Security Layer 7).
@@ -329,7 +364,9 @@ class FargateRuntime(Runtime):
             if state and state.ecs_task_arn:
                 await asyncio.to_thread(self._stop_ecs_task, state)
             if state:
-                await asyncio.to_thread(self._delete_bucket, state.bucket_name)
+                await asyncio.to_thread(
+                    self._delete_s3_prefix, state.bucket_name, state.s3_prefix
+                )
             self._instances.pop(instance_id, None)
         except Exception:  # noqa: BLE001 — destroy must never raise
             pass
@@ -342,40 +379,12 @@ class FargateRuntime(Runtime):
     # Sync helpers (called via asyncio.to_thread)
     # -----------------------------------------------------------------------
 
-    def _create_bucket(self, bucket_name: str) -> None:
-        """Create an S3 bucket with encryption and public access blocked."""
-        s3 = self._session.client("s3", region_name=self._region)
-        if self._region == "us-east-1":
-            s3.create_bucket(Bucket=bucket_name)
-        else:
-            s3.create_bucket(
-                Bucket=bucket_name,
-                CreateBucketConfiguration={"LocationConstraint": self._region},
-            )
-        s3.put_public_access_block(
-            Bucket=bucket_name,
-            PublicAccessBlockConfiguration={
-                "BlockPublicAcls": True,
-                "IgnorePublicAcls": True,
-                "BlockPublicPolicy": True,
-                "RestrictPublicBuckets": True,
-            },
-        )
-        s3.put_bucket_encryption(
-            Bucket=bucket_name,
-            ServerSideEncryptionConfiguration={
-                "Rules": [
-                    {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
-                ]
-            },
-        )
-
     def _upload_file(
-        self, bucket_name: str, workspace: Path, file_path: Path
+        self, bucket_name: str, s3_prefix: str, workspace: Path, file_path: Path
     ) -> None:
-        """Upload a single workspace file to S3 under the workspace/ prefix."""
+        """Upload a single workspace file to S3 under the run's S3 prefix."""
         s3 = self._session.client("s3", region_name=self._region)
-        key = "workspace/" + str(file_path.relative_to(workspace))
+        key = s3_prefix + str(file_path.relative_to(workspace))
         body = file_path.read_bytes()
         s3.put_object(Bucket=bucket_name, Key=key, Body=body)
 
@@ -384,14 +393,22 @@ class FargateRuntime(Runtime):
     ) -> str:
         """Launch an ECS Fargate task and return its task ARN.
 
-        The task definition sets entryPoint=["/bin/sh"] to override the
-        Chainguard image's default ENTRYPOINT. Here we only override `command`
-        with ["-c", task] so the effective invocation is `/bin/sh -c <task>`.
+        The injected command is:
+            <s3-download-bootstrap> && <user-task>
 
-        Note: `entryPoint` is NOT a valid field in containerOverrides at
-        run_task time — it must be set in the task definition itself.
-        (Decision #53, ECS equivalent.)
+        The bootstrap uses boto3 (pre-installed in the runtime image) to
+        download all files from s3://{bucket}/{prefix}* into /workspace.
+        This is what makes the workspace available inside the container.
+
+        SS_BUCKET, SS_PREFIX, SS_REGION are injected as container environment
+        variables so the bootstrap can locate the workspace on S3.
+
+        The task definition sets entryPoint=["/bin/sh"] to override any
+        default ENTRYPOINT in the image. Here we only override `command`
+        with ["-c", <full_command>] so the effective invocation is:
+            /bin/sh -c "<bootstrap> && <user-task>"
         """
+        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {task}"
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
             cluster=state.cluster_arn,
@@ -409,12 +426,14 @@ class FargateRuntime(Runtime):
                     {
                         "name": "sandbox",
                         # command overrides CMD. entryPoint=["/bin/sh"] is fixed
-                        # in the task definition, so this becomes: /bin/sh -c <task>
-                        "command": ["-c", task],
+                        # in the task definition, so this becomes:
+                        #   /bin/sh -c "<bootstrap> && <user-task>"
+                        "command": ["-c", full_command],
                         "environment": [
-                            {"name": "SS_BUCKET",  "value": state.bucket_name},
-                            {"name": "SS_PREFIX",  "value": "workspace/"},
-                            {"name": "SS_TASK_ID", "value": instance_id},
+                            {"name": "SS_BUCKET",   "value": state.bucket_name},
+                            {"name": "SS_PREFIX",   "value": state.s3_prefix},
+                            {"name": "SS_REGION",   "value": state.region},
+                            {"name": "SS_TASK_ID",  "value": instance_id},
                         ],
                     }
                 ]
@@ -533,17 +552,16 @@ class FargateRuntime(Runtime):
         except Exception:  # noqa: BLE001
             pass
 
-    def _delete_bucket(self, bucket_name: str) -> None:
-        """Delete all objects then the S3 bucket. No-op if bucket doesn't exist."""
+    def _delete_s3_prefix(self, bucket_name: str, s3_prefix: str) -> None:
+        """Delete all S3 objects under the run's prefix. No-op if nothing exists."""
         s3 = self._session.client("s3", region_name=self._region)
         try:
             paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket_name):
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix):
                 objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
                 if objects:
                     s3.delete_objects(
                         Bucket=bucket_name, Delete={"Objects": objects}
                     )
-            s3.delete_bucket(Bucket=bucket_name)
         except Exception:  # noqa: BLE001
             pass

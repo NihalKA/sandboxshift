@@ -83,6 +83,10 @@ resource "aws_cloudwatch_log_group" "sandboxshift" {
 # No user input required — bucket name is derived from AWS account and a
 # random suffix stored in Terraform state.
 # Decision #25: AES256 SSE (not KMS) — no key management overhead for V1.
+#
+# This is the PERSISTENT bucket used across all runs. Each run uploads its
+# workspace under a unique prefix (workspace/{instance_id}/) and cleans up
+# after itself. The 1-day S3 lifecycle rule is a safety net.
 
 resource "aws_s3_bucket" "workspace" {
   bucket = local.workspace_bucket_name
@@ -176,7 +180,12 @@ resource "aws_iam_role_policy" "task_s3" {
     Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
-      Action = ["s3:GetObject", "s3:ListBucket"]
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+      ]
       Resource = [
         aws_s3_bucket.workspace.arn,
         "${aws_s3_bucket.workspace.arn}/*",
@@ -224,16 +233,13 @@ resource "aws_ecs_task_definition" "sandbox" {
     essential = true
 
     # entryPoint is set here in the task definition (not overrideable at
-    # run_task time via containerOverrides). This overrides the Chainguard
-    # image's default ENTRYPOINT ["python"] so that the command injected by
-    # FargateRuntime ("-c", "<task>") is passed to /bin/sh, not to python.
-    # Without this, ECS runs: python /bin/sh -c <task>, which makes Python
-    # try to execute /bin/sh as a script and crash with an ELF SyntaxError.
-    # (Mirrors Decision #53 for PodmanRuntime; ECS equivalent fix.)
+    # run_task time via containerOverrides). This overrides any default
+    # ENTRYPOINT in the image so that the command injected by FargateRuntime
+    # ("-c", "<bootstrap> && <task>") is passed to /bin/sh.
     entryPoint = ["/bin/sh"]
 
     # Default command placeholder — always overridden by FargateRuntime at
-    # run_task time via containerOverrides.command = ["-c", "<task>"]
+    # run_task time via containerOverrides.command = ["-c", "<full_command>"]
     command = ["-c", "echo sandboxshift ready"]
 
     logConfiguration = {
