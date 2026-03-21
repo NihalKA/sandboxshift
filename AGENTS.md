@@ -70,8 +70,9 @@ SandboxShift:   Your code → Your local OR Your AWS → You own everything
 ```
 Core API:        FastAPI (Python)
 Local Runtime:   Podman (rootless, daemonless — better security than Docker)
-Security Layer:  gVisor (syscall interception on top of Podman)
-Base Images:     Chainguard (zero-CVE base images)
+Security Layer:  gVisor (syscall interception on top of Podman) — V2
+Base Images:     Docker Hub official slim (python:3.11-slim, node:20-slim)
+                 Chainguard planned for V2 (zero-CVE, SBOM)
 Cloud Burst:     AWS Fargate (your AWS account, pay per use)
 IaC:             Terraform (provisions AWS resources)
 Observability:   OpenTelemetry → CloudWatch / Grafana
@@ -147,9 +148,10 @@ sensitivity:
 ## Security Architecture (7 Layers — Defence in Depth)
 
 ```
-Layer 1: Chainguard base image     → Zero CVEs inside container
+Layer 1: Official slim base image  → Minimal packages, non-root user (UID 10000)
+                                     (Chainguard zero-CVE images planned for V2)
 Layer 2: Podman rootless           → No root daemon
-Layer 3: gVisor                    → Syscall interception
+Layer 3: gVisor                    → Syscall interception (V2)
 Layer 4: Network policy            → Whitelist only approved endpoints
 Layer 5: Resource limits (cgroups) → CPU/RAM caps enforced
 Layer 6: Sensitive data detection  → Never send secrets to cloud
@@ -228,17 +230,17 @@ sandboxshift/
 │       ├── variables.tf         ← all Terraform input variables
 │       ├── outputs.tf           ← outputs matching FargateRuntime constructor params
 │       └── README.md            ← prerequisites, quick start, env var wiring ✓ BUILT
-├── images/                      ← Chainguard-based runtime images ✓ BUILT
+├── images/                      ← Docker Hub official slim runtime images ✓ BUILT
 │   ├── Makefile                 ← build-python, build-node, build-multi, push-all
 │   ├── README.md                ← image strategy, selection table, security properties
 │   ├── python/
-│   │   ├── Dockerfile           ← cgr.dev/chainguard/python:latest-dev
+│   │   ├── Dockerfile           ← python:3.11-slim (Docker Hub official)
 │   │   └── README.md
 │   ├── node/
-│   │   ├── Dockerfile           ← cgr.dev/chainguard/node:latest-dev
+│   │   ├── Dockerfile           ← node:20-slim (Docker Hub official)
 │   │   └── README.md
 │   └── multi/
-│       ├── Dockerfile           ← cgr.dev/chainguard/wolfi-base + python-3.11 + nodejs-20
+│       ├── Dockerfile           ← python:3.11-slim + NodeSource nodejs 20
 │       └── README.md
 ├── tests/
 │   ├── api/                     ← FastAPI layer tests ✓ BUILT
@@ -292,6 +294,7 @@ sandboxshift/
 
 ### Phase 2 — V2
 - [ ] gVisor integration
+- [ ] Chainguard base images (zero-CVE, SBOM, supply chain security)
 - [ ] Checkpoint + resume mid-execution migration
 - [ ] LLM-based sensitivity classifier
 - [ ] MCP server (plug into Claude Desktop, Cursor)
@@ -317,7 +320,7 @@ sandboxshift/
 | # | Decision | Choice | Reason | Date |
 |---|----------|--------|--------|------|
 | 1 | Local runtime engine | Podman | Rootless, daemonless, K8s-native | 2026-03-07 |
-| 2 | Base images | Chainguard | Zero CVEs, SBOM, supply chain security | 2026-03-07 |
+| 2 | Base images | ~~Chainguard~~ → Docker Hub official slim (superseded by #61) | Original intent; changed due to shell availability — see #61 | 2026-03-07 |
 | 3 | Cloud provider | AWS Fargate | Nihal has AWS experience, pay-per-use | 2026-03-07 |
 | 4 | Core language | Python/FastAPI | Nihal's existing strength | 2026-03-07 |
 | 5 | V1 switching strategy | Decide upfront, fail gracefully | Simpler, reliable, no data loss | 2026-03-07 |
@@ -362,13 +365,13 @@ sandboxshift/
 | 44 | CLI subcommand structure | argparse nested subparsers: sandboxshift {run, audit {tail}} | Extensible for future subcommands (audit export, config validate); matches POSIX conventions | 2026-03-14 |
 | 45 | CLI --allow validation | FQDN-only via _validate_allow_hosts(); bare IPs rejected at CLI boundary | CLI users bypass models.py — duplicate guard required to preserve Layer 4 for direct CLI execution | 2026-03-14 |
 | 46 | CLI --memory-mb / --cpu bounds | Post-parse validation: memory 128–65536 MB, cpu 0.25–64.0 | CLI users bypass models.py le= constraints; prevents crash-the-host via pathological cgroup values | 2026-03-14 |
-| 47 | Runtime image Chainguard variant | :latest-dev for python/node (not distroless :latest) | PodmanRuntime runs /bin/sh -c <task>; distroless :latest has no shell and would fail every task; :latest-dev adds BusyBox (/bin/sh) + apk; network egress still controlled by PodmanRuntime allowlist (Decision #18) | 2026-03-14 |
-| 48 | Multi-runtime base image | cgr.dev/chainguard/wolfi-base + apk add python-3.11 nodejs-20 busybox | Wolfi is the upstream distro for all Chainguard images; single-layer apk install avoids fragile cross-image COPY --from; apk cache removed after install; V2 will strip apk from final layer via multi-stage build | 2026-03-14 |
+| 47 | Runtime image shell requirement | SUPERSEDED by #61 | Was: Chainguard :latest-dev for shell; switched to Docker Hub official slim which has /bin/sh natively | 2026-03-14 |
+| 48 | Multi-runtime base image | SUPERSEDED by #61 | Was: cgr.dev/chainguard/wolfi-base; switched to python:3.11-slim + NodeSource | 2026-03-14 |
 | 49 | Port exposure YAML loader | `load_workspace_config()` in `src/config_loader.py`; CLI loads it before arg merge; API does not use it | CLI-only in V1; API consumers build SandboxConfig directly | 2026-03-19 |
 | 50 | Port host bind address | Always `127.0.0.1` (never `0.0.0.0`) on host side | Prevents exposing sandbox ports on LAN or public interfaces | 2026-03-19 |
 | 51 | Streaming subprocess trigger | `subprocess.Popen` + line stream used when `config.ports` non-empty; `subprocess.run(capture_output=True)` kept otherwise | Long-running servers need real-time output; batch tasks benefit from captured stdout | 2026-03-19 |
 | 52 | Port conflict detection | `_check_port_available(host_port)` called in `provision()` before container starts; raises `OSError` | Fail-fast before container starts; avoids silent bind failure | 2026-03-19 |
-| 53 | PodmanRuntime entrypoint override | Always pass `--entrypoint /bin/sh` before the image name; container command is then `-c <task>` | Chainguard python sets `ENTRYPOINT ["python"]`; without override `podman run ... image /bin/sh -c task` becomes `python /bin/sh -c task`, causing Python to exec /bin/sh as a script and crash with ELF-header SyntaxError | 2026-03-19 |
+| 53 | PodmanRuntime entrypoint override | Always pass `--entrypoint /bin/sh` before the image name; container command is then `-c <task>` | python:3.11-slim sets ENTRYPOINT ["python"]; without override /bin/sh -c task becomes python /bin/sh -c task, crashing with SyntaxError | 2026-03-19 |
 | 54 | Unrestricted network mode | `network_allow: ["*"]` → slirp4netns without --dns=none, no --add-host; audited as network_unrestricted_mode with warning | Opt-in escape hatch for trusted workspaces that need arbitrary internet (e.g. npm install from many CDN hosts); intentionally weakens Layer 4; always logged so the operator can see it happened | 2026-03-20 |
 | 55 | min_cpu_required / min_memory_mb_required | SandboxConfig fields (default 0/0.0 = disabled); BurstEngine checks after FORCE_LOCAL, before RAM threshold; violation → cloud, confidence=forced; CPU read failure → cloud, confidence=forced (fail-closed) | Explicit resource minimums are hard requirements — if local can't satisfy them, cloud is the only valid target; CPU read failure treated same as unsatisfied requirement (fail-closed principle); YAML keys: `resources.min_cpu` and `resources.min_memory` | 2026-03-20 |
 | 56 | PORT env var auto-injection | When `config.ports` is non-empty, inject `PORT=<container_port>` into container env (Podman via `--env PORT=N`; Fargate via `containerOverrides.environment`); uses first configured container port | Apps read `process.env.PORT` (Node) or `$PORT` (shell) without hardcoding the port number; consistent between local and cloud runtimes | 2026-03-20 |
@@ -376,6 +379,7 @@ sandboxshift/
 | 58 | S3 upload skip dirs | `_SKIP_DIRS` frozenset in `fargate.py`; `node_modules`, `__pycache__`, `.venv`, `venv`, `env`, `.pytest_cache`, `.tox`, `.eggs`, `dist`, `build`, `.next`, `.nuxt` never uploaded; deps reinstalled in ECS by `_S3_DEPS_BOOTSTRAP`; 500MB cap re-checked against filtered set | node_modules alone can be 6000+ files / hundreds of MB; uploading them wastes S3 bandwidth and time; they are platform-specific (Linux container ≠ macOS host) anyway so uploading would break native addons | 2026-03-21 |
 | 59 | Terraform distribution in setup script | Always download pinned Terraform 1.5.7 to `~/.sandboxshift/bin/terraform` using Python `urllib` + `zipfile` (no curl, no unzip, no system Terraform required); version cached — skipped if already correct; all `terraform` invocations in setup script use `$TF_BIN` | Eliminates version mismatch bugs entirely; Python is the only binary dependency needed to bootstrap the download; consistent behaviour regardless of whether user has Terraform installed | 2026-03-21 |
 | 60 | Python venv isolation in setup script | Create isolated venv at `~/.sandboxshift/venv/`; install sandboxshift into it; symlink CLI to `~/.sandboxshift/bin/sandboxshift`; user adds `~/.sandboxshift/bin` to PATH once | Keeps user's global Python env clean; single PATH entry exposes both `sandboxshift` CLI and `terraform` binary; works for all developers not just DevOps | 2026-03-21 |
+| 61 | V1 base images | Docker Hub official slim: `python:3.11-slim`, `node:20-slim`, multi = `python:3.11-slim` + NodeSource nodejs 20 | Chainguard distroless has no shell; :latest-dev variant (adds BusyBox) proved fragile in practice; Docker Hub official slim images have /bin/sh, apt, pip natively and are always publicly available without auth; non-root UID 10000 added in Dockerfile for Layer 2 security; Chainguard deferred to V2 | 2026-03-21 |
 
 ---
 
