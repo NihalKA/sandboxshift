@@ -410,8 +410,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--ram-threshold",
         dest="ram_threshold",
         type=int,
-        default=4096,
-        help="Available RAM threshold in MB below which cloud bursting is triggered (default: 4096)",
+        default=1024,
+        help="Available RAM threshold in MB below which cloud bursting is triggered (default: 1024)",
     )
     run_parser.add_argument(
         "--skip-sensitivity-check",
