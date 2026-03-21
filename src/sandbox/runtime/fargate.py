@@ -213,7 +213,8 @@ class FargateRuntime(Runtime):
         """Provision a cloud sandbox.
 
         Uploads workspace files to the persistent S3 bucket under a unique
-        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames.
+        per-run prefix (workspace/{instance_id}/), skipping sensitive filenames
+        and the .git directory (git history is irrelevant inside the container).
 
         Args:
             workspace: Local directory to stage to S3. Must exist.
@@ -241,7 +242,9 @@ class FargateRuntime(Runtime):
         files = [
             f
             for f in workspace.rglob("*")
-            if f.is_file() and not _sensitive_filename(f.name)
+            if f.is_file()
+            and not _sensitive_filename(f.name)
+            and ".git" not in f.relative_to(workspace).parts
         ]
         _step(f"Uploading {len(files)} workspace file(s) to S3 ...")
         for f in files:
