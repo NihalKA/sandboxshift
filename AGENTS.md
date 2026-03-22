@@ -142,9 +142,10 @@ resources:
   memory: 4GB
   min_cpu: 4              # burst to cloud if local has fewer CPUs
   min_memory: 8GB         # burst to cloud if local has less available RAM
-  # NOTE: cpu and memory only enforce cgroups limits on local Podman.
-  # They have no effect on Fargate — CPU/memory is fixed in the Terraform
-  # task definition. See README for valid Fargate CPU/memory combinations.
+  # NOTE: For local mode, cpu/memory enforce Podman cgroup limits.
+  # For cloud mode, FargateRuntime registers a fresh ECS task definition per
+  # run with the exact CPU/memory requested (Decision #64). Any valid Fargate
+  # CPU/memory combination works — no Terraform re-apply needed.
 
 sensitivity:
   level: auto             # auto-detect sensitive data
@@ -233,7 +234,7 @@ sandboxshift/
 │   │       └── sensitivity.py
 ├── terraform/
 │   └── fargate/                 ← AWS infrastructure for FargateRuntime ✓ BUILT
-│       ├── main.tf              ← ECS cluster, task def, IAM, SG, CW log group, S3 bucket
+│       ├── main.tf              ← ECS cluster, IAM roles, SG, CW log group, S3 bucket (no static task def — registered dynamically per run, Decision #64)
 │       ├── variables.tf         ← all Terraform input variables
 │       ├── outputs.tf           ← outputs matching FargateRuntime constructor params
 │       └── README.md            ← prerequisites, quick start, env var wiring ✓ BUILT
@@ -389,6 +390,7 @@ sandboxshift/
 | 61 | V1 base images | Docker Hub official slim: `python:3.11-slim`, `node:20-slim`, multi = `python:3.11-slim` + NodeSource nodejs 20 | Chainguard distroless has no shell; :latest-dev variant (adds BusyBox) proved fragile in practice; Docker Hub official slim images have /bin/sh, apt, pip natively and are always publicly available without auth; non-root UID 10000 added in Dockerfile for Layer 2 security; Chainguard deferred to V2 | 2026-03-21 |
 | 62 | Fargate per-run CPU/memory | **CORRECTED 2026-03-22** — `overrides.cpu` / `overrides.memory` in `run_task()` are **EC2-only** and cause `InvalidParameterException` on Fargate. Removed from `_run_ecs_task()`. `resources.cpu` / `resources.memory` in sandboxshift.yaml only enforce Podman cgroup limits in local mode — they have no effect on Fargate runs. Fargate CPU/memory is fixed in the Terraform task definition. | 2026-03-22 |
 | 63 | `--mode local/cloud/auto` CLI flag + `sandbox.mode` YAML key | `--mode local` → `BurstEngine(ram_threshold_gb=0.0)` (available RAM always ≥ 0 → always local); `--mode cloud` → `BurstEngine(ram_threshold_gb=float("inf"))` (available RAM never ≥ ∞ → always cloud); `--mode auto` (default) → check YAML `sandbox.mode` key (parsed as `sandbox_mode` in config loader dict), then fall back to `--ram-threshold`. CLI `--mode` always wins over YAML. Neither `--mode cloud` nor `sandbox.mode: cloud` can override sensitivity FORCE_LOCAL (Layer 6 is immutable). No changes to `SandboxConfig`, `BurstEngine`, or `SandboxManager` — translation is done entirely in `_run_async()` in `cli/main.py`. | 2026-03-22 |
+| 64 | Dynamic Fargate task definition | Register ECS task def in `provision()` with exact CPU/memory/image for each run; deregister in `destroy()`. Removes static Terraform `aws_ecs_task_definition`. Replaces `task_def_arn` constructor param with `execution_role_arn`, `task_role_arn`, `task_family`, `ecr_image`. Each run uses a unique family name (`task_family-instance_id`). | Any valid Fargate CPU/memory combination works without a Terraform re-apply; deregistering in `destroy()` covers both batch tasks (auto-destroyed) and server tasks (stopped via `sandboxshift stop`); unique family per run enables parallel cloud runs without conflicts | 2026-03-22 |
 
 ---
 

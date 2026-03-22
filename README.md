@@ -39,7 +39,7 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 **Prerequisites — you install these:**
 
 | Requirement | For | Install |
-|-------------|-----|---------|
+|-------------|-----|-------|
 | Python 3.11+ | always | [python.org](https://python.org) |
 | Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
 | AWS CLI v2 | cloud burst only | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
@@ -184,7 +184,7 @@ Defence in depth — every layer adds independent protection:
 SandboxShift auto-detects your language from workspace markers:
 
 | Found in workspace | Runtime used |
-|-------------------|--------------|
+|-------------------|-------------|
 | `requirements.txt` | `sandboxshift/runtime-python:3.11` |
 | `package.json` | `sandboxshift/runtime-node:20` |
 | Multiple found | `sandboxshift/runtime-multi` |
@@ -235,9 +235,10 @@ network:
 resources:
   # -- Container limits: applied to BOTH local and cloud --
   # Local:  caps Podman container CPU/RAM via cgroups
-  # Cloud:  passed as ECS task-level overrides on every run_task call
+  # Cloud:  FargateRuntime registers a fresh ECS task definition per run
+  #         with the exact CPU/memory requested (Decision #64). No re-apply needed.
   #         Fargate requires valid CPU/memory combinations — see table below.
-  cpu: 2                     # CPU cores (local: Podman cgroup; cloud: ECS task override — 2 = 2048 CPU units)
+  cpu: 2                     # CPU cores (local: Podman cgroup; cloud: baked into task def per run — 2 = 2048 CPU units)
   memory: 4GB                # RAM cap — also accepts "4096MB" or 4096 (MB int)
 
   # -- Host requirements (burst triggers) --
@@ -253,7 +254,7 @@ ports:
 
 **Key facts:**
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
-- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via ECS task-level overrides on every `run_task` call (no Terraform re-apply needed)
+- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via a fresh ECS task definition registered per run (Decision #64) with the exact CPU/memory requested — any valid Fargate combination works, no Terraform re-apply needed
 - `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
 - `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
 - `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
@@ -314,8 +315,8 @@ sandboxshift run <workspace> <task> [options]
 | `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
 | `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
-| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.memory`. Must be a valid Fargate combination with `--cpu` when running in cloud. |
-| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.cpu`. Must be a valid Fargate combination with `--memory-mb` when running in cloud. |
+| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: baked into a fresh ECS task definition registered per run (Decision #64). Overrides YAML `resources.memory`. Must be a valid Fargate combination with `--cpu` when running in cloud. |
+| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: baked into a fresh ECS task definition registered per run (Decision #64). Overrides YAML `resources.cpu`. Must be a valid Fargate combination with `--memory-mb` when running in cloud. |
 | `--ram-threshold N` | `1024` | **Auto-mode burst trigger (MB).** If available host RAM < N MB, burst to cloud. Only used when `--mode auto` (and YAML `sandbox.mode: auto`). Use `--mode cloud` / `--mode local` for a cleaner toggle. |
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
@@ -364,8 +365,8 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 | Setup command | `sandbox.setup` | `--setup` | CLI wins |
 | Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
 | Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely. **Local enforcement only.** |
-| CPU limit | `resources.cpu` | `--cpu` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task override per run). |
-| Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task override per run). |
+| CPU limit | `resources.cpu` | `--cpu` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task definition registered per run, Decision #64). |
+| Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task definition registered per run, Decision #64). |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
 | Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
 | Min CPU (burst trigger) | `resources.min_cpu` | no CLI flag | YAML only |
