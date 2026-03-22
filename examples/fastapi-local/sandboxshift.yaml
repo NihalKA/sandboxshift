@@ -5,10 +5,15 @@
 #
 # Equivalent CLI (overrides this file):
 #   sandboxshift run examples/fastapi-local \\
-#     "uvicorn main:app --host 0.0.0.0 --port 8000" \\
+#     "python -m uvicorn main:app --host 0.0.0.0 --port 8000" \\
 #     --mode local \\
 #     --port 8000 \\
 #     --setup "pip install -r requirements.txt"
+#
+# Note: 'python -m uvicorn' is used instead of 'uvicorn' directly to avoid
+# PATH issues with pip user-installs. After rebuilding images with
+# 'make -C images build-python' (which adds ~/.local/bin to PATH), plain
+# 'uvicorn' will also work.
 
 sandbox:
   mode: local

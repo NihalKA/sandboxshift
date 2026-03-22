@@ -45,3 +45,11 @@ RUN groupadd -g 10000 sandboxshift \
  && chown 10000:10000 /workspace
 
 USER 10000:10000
+
+# Set HOME explicitly so pip user-installs go to /home/sandboxshift/.local/
+# (without this, $HOME may default to /tmp and scripts land in /tmp/.local/bin
+# which is not on PATH). PATH is extended so scripts installed via
+# 'pip install -r requirements.txt' (e.g. uvicorn, pytest) are directly
+# executable inside the sandbox without needing 'python -m <cmd>'.
+ENV HOME=/home/sandboxshift
+ENV PATH=/home/sandboxshift/.local/bin:$PATH

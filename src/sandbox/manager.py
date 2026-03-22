@@ -27,6 +27,7 @@ Audit events emitted:
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,7 +125,7 @@ class SandboxManager:
         local_runtime:  Required. PodmanRuntime (or any Runtime) for local execution.
         cloud_runtime:  Optional. FargateRuntime for cloud execution.  When None
                         and BurstEngine decides "cloud" with confidence="preferred",
-                        falls back to local with an audit warning (fail-closed).
+                        falls back to local with a stderr warning (fail-closed).
                         When None and confidence="forced" (min_cpu or min_memory
                         requirement not met), raises CloudRuntimeRequiredError.
         burst_engine:   BurstEngine instance.  Decides local vs cloud.
@@ -169,7 +170,8 @@ class SandboxManager:
           3. BurstEngine.decide(scan_result, workspace, config) → BurstDecision.
           4. If decision.mode == "cloud" but cloud_runtime is None:
              - confidence="preferred" → emit "cloud_runtime_unavailable" audit
-               event; override mode to "local" (graceful fallback).
+               event; print a stderr warning; override mode to "local" (graceful
+               fallback).
              - confidence="forced" → emit "cloud_runtime_unavailable" audit
                event; raise CloudRuntimeRequiredError. Run is blocked entirely.
           5. Select runtime: cloud_runtime if mode=="cloud", else local_runtime.
@@ -249,7 +251,8 @@ class SandboxManager:
         runtime_mode = decision.mode
 
         # Step 4: Cloud fallback / block when cloud_runtime is not available.
-        # - confidence="preferred": RAM threshold advisory → fall back to local.
+        # - confidence="preferred": RAM threshold advisory → fall back to local
+        #   with a visible stderr warning so the user knows why.
         # - confidence="forced": hard requirement (min_cpu / min_memory) → block.
         if runtime_mode == "cloud" and self._cloud_runtime is None:
             self._audit.record(
@@ -263,6 +266,17 @@ class SandboxManager:
             if decision.confidence == "forced":
                 raise CloudRuntimeRequiredError(decision.reason)
             # confidence == "preferred" — advisory only, fall back gracefully.
+            # Print a visible warning so the user understands why the run
+            # went local instead of cloud (e.g. sandbox.mode: cloud in YAML
+            # but sandboxshift-setup.sh cloud was never run).
+            print(
+                "[sandboxshift] Warning: cloud mode requested but Fargate is not "
+                "configured (FARGATE_* env vars missing). "
+                "Falling back to local (Podman). "
+                "Run './sandboxshift-setup.sh cloud' to enable cloud burst.",
+                file=sys.stderr,
+                flush=True,
+            )
             runtime_mode = "local"
 
         # Step 5: Runtime selection
