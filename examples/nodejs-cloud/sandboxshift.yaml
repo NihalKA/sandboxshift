@@ -25,7 +25,9 @@ workspace:
 # by your VPC routing and security groups, not by SandboxShift.
 
 resources:
-  # Fargate: 1 vCPU requires 2–8 GB memory.
+  # NOTE: cpu and memory only affect local Podman (cgroups).
+  # For Fargate, CPU/memory is fixed in the Terraform task definition.
+  # See README for valid Fargate CPU/memory combinations.
   cpu: 1.0
   memory: 2GB
 

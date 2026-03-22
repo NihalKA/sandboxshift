@@ -22,7 +22,8 @@ workspace:
 # by your VPC routing and security groups, not by SandboxShift.
 
 resources:
-  # Fargate: 4 vCPU requires 8–30 GB memory.
-  # See README or https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html
+  # NOTE: cpu and memory only affect local Podman (cgroups).
+  # For Fargate, CPU/memory is fixed in the Terraform task definition.
+  # See README for valid Fargate CPU/memory combinations.
   cpu: 4.0
   memory: 8GB

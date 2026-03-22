@@ -207,6 +207,12 @@ class FargateRuntime(Runtime):
     The tail blocks until Ctrl+C — the server keeps running. Use
     `sandboxshift stop <instance_id>` to stop the Fargate task.
 
+    Resource sizing for Fargate (CPU / memory) is fixed in the Terraform task
+    definition. The resources.cpu and resources.memory fields in
+    sandboxshift.yaml only affect local Podman (cgroups) — they have no effect
+    on cloud runs. Fargate does not support per-run task-level cpu/memory
+    overrides via run_task() — those fields are EC2-only.
+
     Args:
         cluster_arn:              ARN of the ECS cluster to run tasks in.
         task_def_arn:             ARN of the ECS task definition (family:revision).
@@ -601,10 +607,11 @@ class FargateRuntime(Runtime):
           3. config.setup_command   — optional user pre-task command (if set, e.g. "npm ci")
           4. task                   — the user's command
 
-        config.cpu_limit and config.memory_limit_mb are passed as task-level
-        overrides to ECS run_task (Decision #62), allowing each run to use a
-        different CPU/RAM size without modifying the Terraform task definition.
-        Fargate requires valid CPU/memory combinations — see AWS Fargate docs.
+        CPU and memory are NOT overridden per-run. Fargate rejects task-level
+        overrides.cpu / overrides.memory in run_task() — those fields are only
+        valid for the EC2 launch type. Resource sizing is fixed in the Terraform
+        task definition. config.cpu_limit / config.memory_limit_mb only affect
+        local Podman (cgroups); they have no effect on cloud runs.
 
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
@@ -639,13 +646,10 @@ class FargateRuntime(Runtime):
                 {"name": "PORT", "value": str(state.config.ports[0][1])}
             )
 
-        # Convert cpu_limit (float vCPUs) → ECS CPU units (1024 per vCPU) as a string.
-        # Convert memory_limit_mb → string. Both are passed as task-level overrides
-        # so each run can request a different CPU/RAM size without modifying the
-        # Terraform task definition. (Decision #62)
-        cpu_units = str(int(state.config.cpu_limit * 1024))
-        memory_mib = str(state.config.memory_limit_mb)
-
+        # NOTE: cpu and memory are NOT passed as task-level overrides.
+        # Fargate ignores / rejects overrides.cpu and overrides.memory in
+        # run_task() — those fields are EC2-only and cause InvalidParameterException.
+        # CPU/memory for Fargate is fixed in the Terraform task definition.
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
             cluster=state.cluster_arn,
@@ -659,8 +663,6 @@ class FargateRuntime(Runtime):
                 }
             },
             overrides={
-                "cpu": cpu_units,
-                "memory": memory_mib,
                 "containerOverrides": [
                     {
                         "name": "sandbox",
@@ -803,7 +805,7 @@ class FargateRuntime(Runtime):
 
         print(
             f"{_C_BLUE}[sandboxshift]{_C_RESET} "
-            f"Streaming logs (Ctrl+C to stop tailing — server stays running):\n",
+            f"Streaming logs (Ctrl+C to stop tailing \u2014 server stays running):\n",
             flush=True,
         )
 
