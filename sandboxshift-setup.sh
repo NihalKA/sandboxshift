@@ -351,9 +351,14 @@ ok "terraform.tfvars written"
 
 # ---------------------------------------------------------------------------
 # Step 12: terraform init + apply  (using OUR pinned terraform binary)
+#
+# -reconfigure is required on re-runs: Terraform detects a backend config
+# change between runs and refuses to proceed without it. Since the backend
+# is always local (no remote state store), reconfigure is correct — it
+# resets the backend without attempting any state migration.
 # ---------------------------------------------------------------------------
 step "Running terraform init ..."
-(cd "$TF_DIR" && "$TF_BIN" init -upgrade -input=false -no-color 2>&1 | \
+(cd "$TF_DIR" && "$TF_BIN" init -upgrade -reconfigure -input=false -no-color 2>&1 | \
   grep -v '^$' | sed 's/^/  /')
 ok "terraform init complete"
 
