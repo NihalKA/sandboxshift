@@ -256,7 +256,7 @@ sandboxshift/
 │       ├── test_manager.py      ← SandboxManager tests ✓ BUILT (23 tests across 7 groups)
 │       ├── runtime/
 │       │   ├── test_podman.py   ← PodmanRuntime tests ✓ BUILT (46 tests across 9 groups)
-│       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (29 tests)
+│       │   └── test_fargate.py  ← FargateRuntime tests ✓ BUILT (32 tests)
 │       ├── burst/               ← BurstEngine tests ✓ BUILT
 │       │   └── test_engine.py
 │       └── detection/           ← SensitivityScanner tests ✓ BUILT
@@ -380,6 +380,7 @@ sandboxshift/
 | 59 | Terraform distribution in setup script | Always download pinned Terraform 1.5.7 to `~/.sandboxshift/bin/terraform` using Python `urllib` + `zipfile` (no curl, no unzip, no system Terraform required); version cached — skipped if already correct; all `terraform` invocations in setup script use `$TF_BIN` | Eliminates version mismatch bugs entirely; Python is the only binary dependency needed to bootstrap the download; consistent behaviour regardless of whether user has Terraform installed | 2026-03-21 |
 | 60 | Python venv isolation in setup script | Create isolated venv at `~/.sandboxshift/venv/`; install sandboxshift into it; symlink CLI to `~/.sandboxshift/bin/sandboxshift`; user adds `~/.sandboxshift/bin` to PATH once | Keeps user's global Python env clean; single PATH entry exposes both `sandboxshift` CLI and `terraform` binary; works for all developers not just DevOps | 2026-03-21 |
 | 61 | V1 base images | Docker Hub official slim: `python:3.11-slim`, `node:20-slim`, multi = `python:3.11-slim` + NodeSource nodejs 20 | Chainguard distroless has no shell; :latest-dev variant (adds BusyBox) proved fragile in practice; Docker Hub official slim images have /bin/sh, apt, pip natively and are always publicly available without auth; non-root UID 10000 added in Dockerfile for Layer 2 security; Chainguard deferred to V2 | 2026-03-21 |
+| 62 | Fargate per-run CPU/memory | Pass `cpu_limit` (×1024 → ECS CPU units string) and `memory_limit_mb` (string) as task-level `overrides.cpu`/`overrides.memory` in `ecs.run_task()` | Allows per-run resource sizing without modifying the Terraform task definition; `resources.cpu`/`resources.memory` now work consistently for both local (Podman cgroups) and cloud (ECS task override); Fargate requires valid CPU/memory combinations — invalid combos fail fast at ECS level | 2026-03-22 |
 
 ---
 

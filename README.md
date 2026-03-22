@@ -144,7 +144,7 @@ Defence in depth — every layer adds independent protection:
 SandboxShift auto-detects your language from workspace markers:
 
 | Found in workspace | Runtime used |
-|-------------------|-------------|
+|-------------------|--------------|
 | `requirements.txt` | `sandboxshift/runtime-python:3.11` |
 | `package.json` | `sandboxshift/runtime-node:20` |
 | Multiple found | `sandboxshift/runtime-multi` |
@@ -188,13 +188,13 @@ network:
   #   - "*"
 
 resources:
-  # -- Container limits: LOCAL ONLY (Podman cgroup caps) --
-  # These cap what the Podman container can consume on your machine.
-  # They have NO effect on cloud runs — Fargate CPU/RAM is set by the ECS
-  # task definition in Terraform (terraform/fargate/). To change cloud
-  # resources, edit the task definition and re-run `terraform apply`.
-  cpu: 2                     # CPU cores given to the local Podman container
-  memory: 4GB                # RAM cap for the local container — also accepts "4096MB" or 4096 (MB int)
+  # -- Container limits: applied to BOTH local and cloud --
+  # Local:  caps Podman container CPU/RAM via cgroups
+  # Cloud:  passed as ECS task-level overrides on every run_task call (Decision #62)
+  #         so each run can use a different size without modifying the Terraform
+  #         task definition. Fargate requires valid CPU/memory combinations.
+  cpu: 2                     # CPU cores (local: Podman cgroup; cloud: ECS task override — 2 = 2048 CPU units)
+  memory: 4GB                # RAM cap — also accepts "4096MB" or 4096 (MB int)
 
   # -- Host requirements (burst triggers) --
   # These describe what your local machine must have available.
@@ -209,7 +209,7 @@ ports:
 
 **Key facts:**
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
-- `resources.cpu` / `resources.memory` are **local only** — Podman cgroup caps applied to the local container. They have no effect on cloud runs. To change Fargate CPU/RAM, edit `terraform/fargate/` and re-run `terraform apply`
+- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via ECS task-level overrides on every `run_task` call (no Terraform re-apply needed). Fargate requires valid CPU/memory combinations (e.g. 2 vCPU → 4–16 GB RAM)
 - `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
 - `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
 - `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
@@ -253,8 +253,8 @@ sandboxshift run <workspace> <task> [options]
 | `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
 | `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
-| `--memory-mb N` | `512` | **Local only.** Podman container RAM cap in MB (128–65536). Overrides YAML `resources.memory`. Has no effect on cloud runs (Fargate RAM is set by the ECS task definition in Terraform). |
-| `--cpu N` | `1.0` | **Local only.** Podman container CPU cores (0.25–64.0). Overrides YAML `resources.cpu`. Has no effect on cloud runs (Fargate CPU is set by the ECS task definition in Terraform). |
+| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.memory`. |
+| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.cpu`. |
 | `--ram-threshold N` | `1024` | **Burst trigger (MB).** If available host RAM < N MB, burst to cloud. Default is 1024 MB (1 GB). Use `999999` to always burst, `0` to never burst. |
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
@@ -262,7 +262,7 @@ sandboxshift run <workspace> <task> [options]
 ### Controlling local vs cloud
 
 | Intent | Command |
-|--------|---------|
+|--------|--------|
 | Auto (default) — local if RAM ≥ 1 GB, else cloud | `sandboxshift run /workspace "task"` |
 | Always burst to cloud | `sandboxshift run /workspace "task" --ram-threshold 999999` |
 | Always stay local | `sandboxshift run /workspace "task" --ram-threshold 0` |
@@ -289,13 +289,13 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 ### YAML vs CLI precedence
 
 | Setting | YAML key | CLI flag | Priority |
-|---------|----------|----------|----------|
+|---------|----------|----------|---------|
 | Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
 | Setup command | `sandbox.setup` | `--setup` | CLI wins |
 | Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
 | Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely. **Local enforcement only.** |
-| CPU limit | `resources.cpu` | `--cpu` | CLI wins. **Local only** — no effect on Fargate. |
-| Memory limit | `resources.memory` | `--memory-mb` | CLI wins. **Local only** — no effect on Fargate. |
+| CPU limit | `resources.cpu` | `--cpu` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task override per run). |
+| Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task override per run). |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
 | Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
 | Min CPU (burst) | `resources.min_cpu` | no CLI flag | YAML only |
