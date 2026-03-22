@@ -18,9 +18,8 @@ sandbox:
 workspace:
   readonly: false
 
-network:
-  allow:
-    - pypi.org         # needed to install numpy during setup
+# network.allow has no effect on Fargate — outbound access is controlled
+# by your VPC routing and security groups, not by SandboxShift.
 
 resources:
   # Fargate: 4 vCPU requires 8–30 GB memory.

@@ -23,10 +23,8 @@ sandbox:
 workspace:
   readonly: false
 
-network:
-  allow:
-    - pypi.org
-    - files.pythonhosted.org
+# network.allow has no effect on Fargate — outbound access is controlled
+# by your VPC routing and security groups, not by SandboxShift.
 
 resources:
   # Fargate: 1 vCPU requires 2–8 GB memory.
