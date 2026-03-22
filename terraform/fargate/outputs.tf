@@ -6,9 +6,14 @@ output "cluster_arn" {
   value       = aws_ecs_cluster.sandboxshift.arn
 }
 
-output "task_def_arn" {
-  description = "ECS task definition ARN — pass as task_def_arn to FargateRuntime (env: FARGATE_TASK_DEFINITION_ARN)."
-  value       = aws_ecs_task_definition.sandbox.arn
+output "execution_role_arn" {
+  description = "IAM execution role ARN — pass as execution_role_arn to FargateRuntime (env: FARGATE_EXECUTION_ROLE_ARN). Used by FargateRuntime to register task definitions dynamically."
+  value       = aws_iam_role.task_execution.arn
+}
+
+output "task_role_arn" {
+  description = "IAM task role ARN — pass as task_role_arn to FargateRuntime (env: FARGATE_TASK_ROLE_ARN). Grants the sandbox container S3 workspace access."
+  value       = aws_iam_role.task_role.arn
 }
 
 output "region" {
@@ -39,4 +44,9 @@ output "server_security_group_id" {
 output "workspace_bucket_name" {
   description = "S3 workspace staging bucket name — set as FARGATE_WORKSPACE_BUCKET env var on the API server."
   value       = aws_s3_bucket.workspace.id
+}
+
+output "ecr_image" {
+  description = "ECR image URI for the runtime-multi image — pass as ecr_image to FargateRuntime (env: FARGATE_ECR_IMAGE). Used when registering task definitions dynamically."
+  value       = var.ecr_registry != "" ? "${var.ecr_registry}/sandboxshift/runtime-multi:latest" : "sandboxshift/runtime-multi:latest"
 }

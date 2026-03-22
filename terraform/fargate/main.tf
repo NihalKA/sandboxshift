@@ -20,7 +20,7 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# ── Random suffix for globally-unique bucket name ──────────────────────────
+# ── Random suffix for globally-unique bucket name ────────────────────────
 #
 # Stored in Terraform state — same suffix survives destroy/re-apply.
 # 3 bytes = 6-char hex string. Combined with account ID this is effectively
@@ -30,7 +30,7 @@ resource "random_id" "workspace_suffix" {
   byte_length = 3
 }
 
-# ── VPC (optional default VPC convenience) ────────────────────────────────
+# ── VPC (optional default VPC convenience) ────────────────────────────
 
 data "aws_vpc" "default" {
   count   = var.use_default_vpc ? 1 : 0
@@ -45,7 +45,7 @@ data "aws_subnets" "default" {
   }
 }
 
-# ── ECS Cluster ─────────────────────────────────────────────────────────────
+# ── ECS Cluster ──────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "sandboxshift" {
   name = var.cluster_name
@@ -68,7 +68,7 @@ resource "aws_ecs_cluster_capacity_providers" "sandboxshift" {
   }
 }
 
-# ── CloudWatch Log Group ──────────────────────────────────────────────────
+# ── CloudWatch Log Group ──────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "sandboxshift" {
   name              = "/sandboxshift/tasks"
@@ -77,7 +77,7 @@ resource "aws_cloudwatch_log_group" "sandboxshift" {
   tags = local.common_tags
 }
 
-# ── S3 Workspace Staging Bucket ───────────────────────────────────────────────
+# ── S3 Workspace Staging Bucket ─────────────────────────────────────────
 #
 # Name is auto-generated: sandboxshift-ws-{account_id}-{6-char-hex}
 # No user input required — bucket name is derived from AWS account and a
@@ -133,7 +133,7 @@ resource "aws_s3_bucket_public_access_block" "workspace" {
   restrict_public_buckets = true
 }
 
-# ── IAM Role for ECS Task Execution ──────────────────────────────────────────
+# ── IAM Role for ECS Task Execution ────────────────────────────────────────
 
 resource "aws_iam_role" "task_execution" {
   name = "${var.cluster_name}-task-execution"
@@ -155,7 +155,7 @@ resource "aws_iam_role_policy_attachment" "task_execution_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ── IAM Role for ECS Task (S3 workspace access) ───────────────────────────
+# ── IAM Role for ECS Task (S3 workspace access) ─────────────────────────
 
 resource "aws_iam_role" "task_role" {
   name = "${var.cluster_name}-task-role"
@@ -194,7 +194,7 @@ resource "aws_iam_role_policy" "task_s3" {
   })
 }
 
-# ── Security Group for Fargate Tasks (batch mode) ─────────────────────────────
+# ── Security Group for Fargate Tasks (batch mode) ───────────────────────────
 
 resource "aws_security_group" "sandbox_task" {
   name        = "${var.cluster_name}-sandbox-task"
@@ -222,10 +222,6 @@ resource "aws_security_group" "sandbox_task" {
 # the --port CLI flag. Allows ALL TCP inbound so the task's public IP is
 # reachable on any configured port. FargateRuntime appends this SG to the
 # task's security groups in server mode; batch tasks never use it.
-#
-# The broad ingress is intentional and documented — server mode is an explicit
-# opt-in (requires ports: config). Security Layer 4 (egress allowlist) is
-# still enforced via sandbox_task SG which is always present.
 
 resource "aws_security_group" "sandbox_server_task" {
   name        = "${var.cluster_name}-sandbox-server"
@@ -244,59 +240,16 @@ resource "aws_security_group" "sandbox_server_task" {
   tags = local.common_tags
 }
 
-# ── ECS Task Definition ──────────────────────────────────────────────────────────
+# NOTE: aws_ecs_task_definition is intentionally absent.
 #
-# Uses runtime-multi image which includes Python 3.11 + Node 20 + busybox.
-# This ensures both `python3`/`pip` and `node`/`npm` are available inside
-# the container for _S3_DEPS_BOOTSTRAP (pip install + npm install) and for
-# running Python or Node tasks. (Decision #48)
-#
-# Image resolution:
-#   - ecr_registry set   → <account>.dkr.ecr.<region>.amazonaws.com/sandboxshift/runtime-multi:latest
-#   - ecr_registry empty → sandboxshift/runtime-multi:latest  (bare name, for local testing)
-# The leading-slash bug ("/sandboxshift/runtime-multi") is avoided by this conditional.
+# Task definitions are created dynamically at runtime by FargateRuntime
+# (Decision #64). Each run registers a fresh task definition with the
+# correct CPU, memory, and image for that run, then deregisters it in
+# destroy(). This allows any valid Fargate CPU/memory combination without
+# a Terraform re-apply. The execution_role_arn and task_role_arn outputs
+# below are passed to FargateRuntime so it can register task definitions.
 
-resource "aws_ecs_task_definition" "sandbox" {
-  family                   = var.task_family
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.task_cpu
-  memory                   = var.task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task_role.arn
-
-  container_definitions = jsonencode([{
-    name      = "sandbox"
-    image     = var.ecr_registry != "" ? "${var.ecr_registry}/sandboxshift/runtime-multi:latest" : "sandboxshift/runtime-multi:latest"
-    essential = true
-
-    # entryPoint is set here in the task definition (not overrideable at
-    # run_task time via containerOverrides). This overrides any default
-    # ENTRYPOINT in the image so that the command injected by FargateRuntime
-    # ("-c", "<bootstrap> && <task>") is passed to /bin/sh.
-    entryPoint = ["/bin/sh"]
-
-    # Default command placeholder — always overridden by FargateRuntime at
-    # run_task time via containerOverrides.command = ["-c", "<full_command>"]
-    command = ["-c", "echo sandboxshift ready"]
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.sandboxshift.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "sandboxshift"
-      }
-    }
-
-    # environment injected at run_task time via container overrides
-    environment = []
-  }])
-
-  tags = local.common_tags
-}
-
-# ── Locals ───────────────────────────────────────────────────────────────────────────
+# ── Locals ───────────────────────────────────────────────────────────
 
 locals {
   workspace_bucket_name = "sandboxshift-ws-${data.aws_caller_identity.current.account_id}-${random_id.workspace_suffix.hex}"

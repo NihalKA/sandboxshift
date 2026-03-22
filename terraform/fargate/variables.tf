@@ -9,24 +9,6 @@ variable "cluster_name" {
   default     = "sandboxshift"
 }
 
-variable "task_family" {
-  description = "ECS task definition family name."
-  type        = string
-  default     = "sandboxshift-sandbox"
-}
-
-variable "task_cpu" {
-  description = "Fargate task CPU units (1024 = 1 vCPU)."
-  type        = number
-  default     = 1024
-}
-
-variable "task_memory" {
-  description = "Fargate task memory in MiB."
-  type        = number
-  default     = 4096
-}
-
 variable "ecr_registry" {
   description = "ECR registry hostname (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com). Leave empty to use Docker Hub image names."
   type        = string
