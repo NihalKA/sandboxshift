@@ -188,10 +188,16 @@ network:
   #   - "*"
 
 resources:
-  cpu: 2                     # CPU cores allocated to the container (default: 2.0)
-  memory: 4GB                # container RAM cap — also accepts "4096MB" or 4096 (MB int)
-  min_cpu: 4                 # if local machine has fewer than 4 CPUs → force cloud (hard requirement)
-  min_memory: 8GB            # if local available RAM < 8GB → force cloud (hard requirement)
+  # -- Container limits (enforced inside the sandbox via cgroups) --
+  # These cap what the sandbox process itself can consume.
+  cpu: 2                     # CPU cores given to the container
+  memory: 4GB                # RAM cap for the container — also accepts "4096MB" or 4096 (MB int)
+
+  # -- Host requirements (burst triggers) --
+  # These describe what your local machine must have available.
+  # If the requirement is NOT met, SandboxShift forces cloud — regardless of --ram-threshold.
+  min_cpu: 4                 # host must have ≥ 4 CPUs, otherwise burst to cloud
+  min_memory: 8GB            # host must have ≥ 8GB available RAM, otherwise burst to cloud
 
 ports:
   - 3000:3000                # HOST:CONTAINER — expose container port 3000 on host port 3000
@@ -200,8 +206,8 @@ ports:
 
 **Key facts:**
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
-- `resources.min_cpu` / `resources.min_memory` are **hard requirements** — if not met locally, cloud is forced regardless of `--ram-threshold`
-- `resources.cpu` / `resources.memory` are **container limits** (cgroup caps), not burst triggers
+- `resources.cpu` / `resources.memory` are **container limits** (cgroup caps inside the sandbox) — they do not affect the burst decision
+- `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
 - `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
 - `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
 
