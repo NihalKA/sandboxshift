@@ -1,7 +1,7 @@
 """Tests for FargateRuntime.
 
-32 tests grouped into:
-  Group 1 — Constructor validation (3 tests)
+Groups:
+  Group 1 — Constructor validation (4 tests)
   Group 2 — provision() (8 tests)
   Group 3 — execute() (12 tests)
   Group 4 — destroy() (8 tests)
@@ -28,6 +28,8 @@ _TO_THREAD = "sandboxshift.sandbox.runtime.fargate.asyncio.to_thread"
 _SLEEP = "sandboxshift.sandbox.runtime.fargate.asyncio.sleep"
 _BOTO3_SESSION = "sandboxshift.sandbox.runtime.fargate.boto3.Session"
 
+_MOCK_TASK_DEF_ARN = "arn:aws:ecs:us-east-1:123:task-definition/sandboxshift-sandbox-ss-abc123:1"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -43,6 +45,10 @@ def aws_clients(monkeypatch):
     mock_session.client.side_effect = lambda svc, **kw: {
         "s3": mock_s3, "ecs": mock_ecs, "logs": mock_logs
     }[svc]
+    # register_task_definition returns the registered ARN
+    mock_ecs.register_task_definition.return_value = {
+        "taskDefinition": {"taskDefinitionArn": _MOCK_TASK_DEF_ARN}
+    }
     monkeypatch.setattr(_BOTO3_SESSION, lambda: mock_session)
     return mock_session, mock_s3, mock_ecs, mock_logs
 
@@ -65,11 +71,15 @@ def mock_sleep(monkeypatch):
 def runtime(aws_clients, mock_to_thread):
     return FargateRuntime(
         cluster_arn="arn:aws:ecs:us-east-1:123456789:cluster/test",
-        task_def_arn="arn:aws:ecs:us-east-1:123456789:task-definition/sandbox:1",
+        execution_role_arn="arn:aws:iam::123456789:role/test-execution",
+        task_role_arn="arn:aws:iam::123456789:role/test-task",
         subnet_ids=["subnet-abc123"],
         security_group_ids=["sg-abc123"],
         region="us-east-1",
         log_group="/sandboxshift/tasks",
+        workspace_bucket="sandboxshift-ws-123456789-abc123",
+        task_family="sandboxshift-sandbox",
+        ecr_image="",  # empty = Docker Hub default
     )
 
 
@@ -109,26 +119,34 @@ def _setup_ecs_mocks(mock_ecs, exit_code: int = 0):
 def test_init_stores_config(aws_clients):
     rt = FargateRuntime(
         cluster_arn="arn:cluster",
-        task_def_arn="arn:taskdef",
+        execution_role_arn="arn:aws:iam::123:role/exec",
+        task_role_arn="arn:aws:iam::123:role/task",
         subnet_ids=["subnet-1"],
         security_group_ids=["sg-1"],
         region="eu-west-1",
         log_group="/lg",
+        workspace_bucket="my-bucket",
     )
     assert rt._cluster_arn == "arn:cluster"
+    assert rt._execution_role_arn == "arn:aws:iam::123:role/exec"
+    assert rt._task_role_arn == "arn:aws:iam::123:role/task"
     assert rt._region == "eu-west-1"
     assert rt._log_group == "/lg"
+    assert rt._task_family == "sandboxshift-sandbox"
+    assert rt._ecr_image == "sandboxshift/runtime-multi:latest"
 
 
 def test_init_raises_on_empty_cluster_arn(aws_clients):
     with pytest.raises(ValueError, match="cluster_arn"):
         FargateRuntime(
             cluster_arn="",
-            task_def_arn="arn:taskdef",
+            execution_role_arn="arn:exec",
+            task_role_arn="arn:task",
             subnet_ids=["subnet-1"],
             security_group_ids=["sg-1"],
             region="us-east-1",
             log_group="/lg",
+            workspace_bucket="bucket",
         )
 
 
@@ -136,11 +154,27 @@ def test_init_raises_on_empty_region(aws_clients):
     with pytest.raises(ValueError, match="region"):
         FargateRuntime(
             cluster_arn="arn:cluster",
-            task_def_arn="arn:taskdef",
+            execution_role_arn="arn:exec",
+            task_role_arn="arn:task",
             subnet_ids=["subnet-1"],
             security_group_ids=["sg-1"],
             region="",
             log_group="/lg",
+            workspace_bucket="bucket",
+        )
+
+
+def test_init_raises_on_empty_execution_role_arn(aws_clients):
+    with pytest.raises(ValueError, match="execution_role_arn"):
+        FargateRuntime(
+            cluster_arn="arn:cluster",
+            execution_role_arn="",
+            task_role_arn="arn:task",
+            subnet_ids=["subnet-1"],
+            security_group_ids=["sg-1"],
+            region="us-east-1",
+            log_group="/lg",
+            workspace_bucket="bucket",
         )
 
 
@@ -159,44 +193,22 @@ async def test_provision_returns_instance_id_format(
     assert re.match(r"ss-[0-9a-f]{12}$", result)
 
 
-async def test_provision_creates_s3_bucket(
+async def test_provision_registers_task_definition(
     runtime, tmp_workspace, default_config, aws_clients
 ):
-    _, mock_s3, _, _ = aws_clients
-    instance_id = await runtime.provision(tmp_workspace, default_config)
-    mock_s3.create_bucket.assert_called_once()
-    call_kwargs = mock_s3.create_bucket.call_args
-    assert call_kwargs.kwargs["Bucket"] == f"sandboxshift-{instance_id}"
-
-
-async def test_provision_blocks_public_access(
-    runtime, tmp_workspace, default_config, aws_clients
-):
-    _, mock_s3, _, _ = aws_clients
-    await runtime.provision(tmp_workspace, default_config)
-    mock_s3.put_public_access_block.assert_called_once()
-    config_arg = mock_s3.put_public_access_block.call_args.kwargs[
-        "PublicAccessBlockConfiguration"
-    ]
-    assert config_arg["BlockPublicAcls"] is True
-    assert config_arg["IgnorePublicAcls"] is True
-    assert config_arg["BlockPublicPolicy"] is True
-    assert config_arg["RestrictPublicBuckets"] is True
-
-
-async def test_provision_enables_sse_encryption(
-    runtime, tmp_workspace, default_config, aws_clients
-):
-    _, mock_s3, _, _ = aws_clients
-    await runtime.provision(tmp_workspace, default_config)
-    mock_s3.put_bucket_encryption.assert_called_once()
-    enc_config = mock_s3.put_bucket_encryption.call_args.kwargs[
-        "ServerSideEncryptionConfiguration"
-    ]
-    assert (
-        enc_config["Rules"][0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"]
-        == "AES256"
-    )
+    """provision() must call ecs.register_task_definition with the correct
+    CPU units, memory, family prefix, and role ARNs."""
+    _, mock_s3, mock_ecs, _ = aws_clients
+    config = SandboxConfig(cpu_limit=2.0, memory_limit_mb=4096)
+    instance_id = await runtime.provision(tmp_workspace, config)
+    mock_ecs.register_task_definition.assert_called_once()
+    call_kw = mock_ecs.register_task_definition.call_args.kwargs
+    assert call_kw["cpu"] == "2048"     # 2.0 vCPUs × 1024
+    assert call_kw["memory"] == "4096"
+    assert call_kw["executionRoleArn"] == "arn:aws:iam::123456789:role/test-execution"
+    assert call_kw["taskRoleArn"] == "arn:aws:iam::123456789:role/test-task"
+    assert call_kw["family"].startswith("sandboxshift-sandbox-")
+    assert instance_id in call_kw["family"]
 
 
 async def test_provision_uploads_workspace_files(
@@ -213,33 +225,37 @@ async def test_provision_uploads_workspace_files(
 async def test_provision_raises_on_missing_workspace(
     runtime, default_config, aws_clients
 ):
-    _, mock_s3, _, _ = aws_clients
+    _, mock_s3, mock_ecs, _ = aws_clients
     with pytest.raises(FileNotFoundError):
         await runtime.provision(
             Path("/tmp/sandboxshift-does-not-exist-xyz"), default_config
         )
-    mock_s3.create_bucket.assert_not_called()
+    mock_ecs.register_task_definition.assert_not_called()
 
 
 async def test_provision_raises_on_workspace_too_large(
     runtime, tmp_workspace, default_config, aws_clients, monkeypatch
 ):
-    _, mock_s3, _, _ = aws_clients
+    _, mock_s3, mock_ecs, _ = aws_clients
 
     class _BigStat:
         st_size = 600 * 1024 * 1024  # 600 MB
-        # Python 3.13 is_file() calls stat(follow_symlinks=...).st_mode to check
-        # S_ISREG. Without st_mode the mock raises AttributeError inside pathlib
-        # before the 500 MB guard in provision() is reached.
-        st_mode = _stat_module.S_IFREG | 0o644  # regular file
+        st_mode = _stat_module.S_IFREG | 0o644
 
-    # Python 3.13 pathlib passes follow_symlinks=True as a keyword argument to
-    # stat() from within .exists(), .is_dir(), .is_file() etc.  The mock must
-    # accept and silently ignore any keyword arguments. (**kwargs)
     monkeypatch.setattr(Path, "stat", lambda self, **kwargs: _BigStat())
     with pytest.raises(ValueError, match="500 MB"):
         await runtime.provision(tmp_workspace, default_config)
-    mock_s3.create_bucket.assert_not_called()
+    mock_ecs.register_task_definition.assert_not_called()
+
+
+async def test_provision_stores_registered_task_def_arn(
+    runtime, tmp_workspace, default_config, aws_clients
+):
+    """The registered ARN from ECS must be stored in state."""
+    _, mock_s3, mock_ecs, _ = aws_clients
+    instance_id = await runtime.provision(tmp_workspace, default_config)
+    state = runtime._instances[instance_id]
+    assert state.registered_task_def_arn == _MOCK_TASK_DEF_ARN
 
 
 async def test_provision_records_audit_event(
@@ -248,11 +264,13 @@ async def test_provision_records_audit_event(
     mock_audit = MagicMock(spec=AuditLogger)
     rt = FargateRuntime(
         cluster_arn="arn:cluster",
-        task_def_arn="arn:taskdef",
+        execution_role_arn="arn:exec",
+        task_role_arn="arn:task",
         subnet_ids=["subnet-1"],
         security_group_ids=["sg-1"],
         region="us-east-1",
         log_group="/lg",
+        workspace_bucket="bucket",
         audit_logger=mock_audit,
     )
     await rt.provision(tmp_workspace, default_config)
@@ -260,6 +278,28 @@ async def test_provision_records_audit_event(
     event_dict = mock_audit.record.call_args.args[0]
     assert event_dict["event"] == "provision"
     assert "instance_id" in event_dict
+    assert "task_def_arn" in event_dict
+
+
+async def test_provision_registered_arn_in_audit_event(
+    tmp_workspace, default_config, aws_clients, mock_to_thread
+):
+    """The registered task def ARN must appear in the provision audit event."""
+    mock_audit = MagicMock(spec=AuditLogger)
+    rt = FargateRuntime(
+        cluster_arn="arn:cluster",
+        execution_role_arn="arn:exec",
+        task_role_arn="arn:task",
+        subnet_ids=["subnet-1"],
+        security_group_ids=["sg-1"],
+        region="us-east-1",
+        log_group="/lg",
+        workspace_bucket="bucket",
+        audit_logger=mock_audit,
+    )
+    await rt.provision(tmp_workspace, default_config)
+    event_dict = mock_audit.record.call_args.args[0]
+    assert event_dict["task_def_arn"] == _MOCK_TASK_DEF_ARN
 
 
 # ===========================================================================
@@ -276,6 +316,35 @@ async def test_execute_runs_ecs_task(
     instance_id = await runtime.provision(tmp_workspace, default_config)
     await runtime.execute(instance_id, "echo hi", default_config)
     mock_ecs.run_task.assert_called_once()
+
+
+async def test_execute_uses_registered_task_def_arn(
+    runtime, tmp_workspace, default_config, aws_clients, mock_sleep
+):
+    """_run_ecs_task must use state.registered_task_def_arn, not a static ARN."""
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    instance_id = await runtime.provision(tmp_workspace, default_config)
+    await runtime.execute(instance_id, "echo hi", default_config)
+    call_kw = mock_ecs.run_task.call_args.kwargs
+    assert call_kw["taskDefinition"] == _MOCK_TASK_DEF_ARN
+
+
+async def test_execute_no_cpu_memory_in_task_overrides(
+    runtime, tmp_workspace, aws_clients, mock_sleep
+):
+    """Since CPU/memory are baked into the registered task def, run_task()
+    must NOT include top-level 'cpu'/'memory' overrides (Fargate rejects them)."""
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    config = SandboxConfig(cpu_limit=2.0, memory_limit_mb=4096)
+    instance_id = await runtime.provision(tmp_workspace, config)
+    await runtime.execute(instance_id, "echo hi", config)
+    overrides = mock_ecs.run_task.call_args.kwargs["overrides"]
+    assert "cpu" not in overrides, "overrides.cpu must not be set (EC2-only field)"
+    assert "memory" not in overrides, "overrides.memory must not be set (EC2-only field)"
 
 
 async def test_execute_passes_command_override(
@@ -304,25 +373,9 @@ async def test_execute_includes_setup_command_in_task(
     await runtime.execute(instance_id, "node index.js", config)
     overrides = mock_ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]
     cmd_str = overrides["command"][1]
-    # Both setup_command and the task must appear in the injected ECS command
     assert "npm ci" in cmd_str
     assert "node index.js" in cmd_str
-    # setup_command must run before the main task
     assert cmd_str.index("npm ci") < cmd_str.index("node index.js")
-
-
-async def test_execute_passes_cpu_memory_override(
-    runtime, tmp_workspace, aws_clients, mock_sleep
-):
-    _, mock_s3, mock_ecs, mock_logs = aws_clients
-    _setup_ecs_mocks(mock_ecs)
-    mock_logs.get_log_events.return_value = {"events": []}
-    config = SandboxConfig(cpu_limit=2.0, memory_limit_mb=4096)
-    instance_id = await runtime.provision(tmp_workspace, config)
-    await runtime.execute(instance_id, "echo hi", config)
-    overrides = mock_ecs.run_task.call_args.kwargs["overrides"]
-    assert overrides["cpu"] == "2048"    # 2.0 vCPUs x 1024
-    assert overrides["memory"] == "4096"
 
 
 async def test_execute_passes_environment_vars(
@@ -421,11 +474,13 @@ async def test_execute_records_audit_event(
     mock_logs.get_log_events.return_value = {"events": []}
     rt = FargateRuntime(
         cluster_arn="arn:cluster",
-        task_def_arn="arn:taskdef",
+        execution_role_arn="arn:exec",
+        task_role_arn="arn:task",
         subnet_ids=["subnet-1"],
         security_group_ids=["sg-1"],
         region="us-east-1",
         log_group="/lg",
+        workspace_bucket="bucket",
         audit_logger=mock_audit,
     )
     instance_id = await rt.provision(tmp_workspace, default_config)
@@ -456,6 +511,21 @@ async def test_destroy_stops_ecs_task(
     assert "task/abc123" in call.kwargs.get("task", "")
 
 
+async def test_destroy_deregisters_task_definition(
+    runtime, tmp_workspace, default_config, aws_clients, mock_sleep
+):
+    """destroy() must call ecs.deregister_task_definition with the registered ARN."""
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    instance_id = await runtime.provision(tmp_workspace, default_config)
+    await runtime.execute(instance_id, "echo hi", default_config)
+    await runtime.destroy(instance_id)
+    mock_ecs.deregister_task_definition.assert_called_once_with(
+        taskDefinition=_MOCK_TASK_DEF_ARN
+    )
+
+
 async def test_destroy_deletes_s3_objects(
     runtime, tmp_workspace, default_config, aws_clients, mock_sleep
 ):
@@ -470,20 +540,6 @@ async def test_destroy_deletes_s3_objects(
     instance_id = await runtime.provision(tmp_workspace, default_config)
     await runtime.destroy(instance_id)
     mock_s3.delete_objects.assert_called()
-
-
-async def test_destroy_deletes_s3_bucket(
-    runtime, tmp_workspace, default_config, aws_clients, mock_sleep
-):
-    _, mock_s3, mock_ecs, mock_logs = aws_clients
-    _setup_ecs_mocks(mock_ecs)
-    mock_logs.get_log_events.return_value = {"events": []}
-    mock_paginator = MagicMock()
-    mock_paginator.paginate.return_value = iter([{"Contents": []}])
-    mock_s3.get_paginator.return_value = mock_paginator
-    instance_id = await runtime.provision(tmp_workspace, default_config)
-    await runtime.destroy(instance_id)
-    mock_s3.delete_bucket.assert_called()
 
 
 async def test_destroy_removes_from_instances(
@@ -502,9 +558,10 @@ async def test_destroy_removes_from_instances(
 
 async def test_destroy_idempotent_on_unknown_id(runtime, aws_clients):
     _, mock_s3, mock_ecs, _ = aws_clients
-    # Should not raise and should not call stop_task
+    # Should not raise and should not call stop_task or deregister
     await runtime.destroy("ss-nonexistent")
     mock_ecs.stop_task.assert_not_called()
+    mock_ecs.deregister_task_definition.assert_not_called()
 
 
 async def test_destroy_never_raises_on_error(
@@ -513,7 +570,7 @@ async def test_destroy_never_raises_on_error(
     _, mock_s3, mock_ecs, mock_logs = aws_clients
     _setup_ecs_mocks(mock_ecs)
     mock_logs.get_log_events.return_value = {"events": []}
-    mock_s3.delete_bucket.side_effect = Exception("AWS exploded")
+    mock_s3.delete_objects.side_effect = Exception("AWS exploded")
     mock_paginator = MagicMock()
     mock_paginator.paginate.return_value = iter([{"Contents": []}])
     mock_s3.get_paginator.return_value = mock_paginator
@@ -534,11 +591,13 @@ async def test_destroy_records_audit_event(
     mock_s3.get_paginator.return_value = mock_paginator
     rt = FargateRuntime(
         cluster_arn="arn:cluster",
-        task_def_arn="arn:taskdef",
+        execution_role_arn="arn:exec",
+        task_role_arn="arn:task",
         subnet_ids=["subnet-1"],
         security_group_ids=["sg-1"],
         region="us-east-1",
         log_group="/lg",
+        workspace_bucket="bucket",
         audit_logger=mock_audit,
     )
     instance_id = await rt.provision(tmp_workspace, default_config)
@@ -548,3 +607,19 @@ async def test_destroy_records_audit_event(
     calls = [c.args[0] for c in mock_audit.record.call_args_list]
     destroy_events = [c for c in calls if c.get("event") == "destroy"]
     assert len(destroy_events) >= 1
+
+
+async def test_destroy_deregisters_even_without_execute(
+    runtime, tmp_workspace, default_config, aws_clients
+):
+    """deregister must be called in destroy() even if execute() was never called."""
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = iter([{"Contents": []}])
+    mock_s3.get_paginator.return_value = mock_paginator
+    instance_id = await runtime.provision(tmp_workspace, default_config)
+    await runtime.destroy(instance_id)
+    mock_ecs.deregister_task_definition.assert_called_once_with(
+        taskDefinition=_MOCK_TASK_DEF_ARN
+    )
+    mock_ecs.stop_task.assert_not_called()  # no execute → no ecs_task_arn
