@@ -1,14 +1,16 @@
-# Terraform state is stored locally (terraform.tfstate in this directory).
+# Placeholder — overwritten at runtime by sandboxshift-setup.sh.
 #
-# Why local and not S3?
-# The S3 workspace bucket is *created by* this Terraform config (main.tf).
-# Storing Terraform state in S3 would require a separate pre-existing bucket —
-# a circular dependency with no clean bootstrap path.
+# sandboxshift-setup.sh creates an S3 bucket and DynamoDB table via AWS CLI
+# (before terraform init runs), then writes this file with real values:
 #
-# For a V1 single-developer tool, local state is the correct choice:
-#   - No pre-existing infrastructure required
-#   - State file lives alongside the config in terraform/fargate/
-#   - terraform.tfstate is gitignored (contains sensitive ARNs/IDs)
+#   Bucket: sandboxshift-tfstate-<account_id>-<6char_hash>
+#   Table:  sandboxshift-tfstate-lock-<6char_hash>
+#
+# This placeholder uses a local backend so that:
+#   - `terraform validate` works without AWS credentials
+#   - New clones don't fail before setup.sh has run
+# The local terraform.tfstate (if any) is automatically migrated to S3
+# the next time ./sandboxshift-setup.sh is run.
 terraform {
   backend "local" {
     path = "terraform.tfstate"
