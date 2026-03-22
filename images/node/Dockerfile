@@ -39,3 +39,11 @@ RUN groupadd -g 10000 sandboxshift \
  && chown 10000:10000 /workspace
 
 USER 10000:10000
+
+# Set HOME explicitly so npm, pip and other tools that write to ~ use the
+# correct home directory. Without this, $HOME may default to /tmp and user
+# installs land in /tmp/.local/bin which is not on PATH.
+# PATH is extended so scripts installed via 'npm install' or 'pip install -r'
+# (e.g. via npx, or pip --user) are executable without a prefix.
+ENV HOME=/home/sandboxshift
+ENV PATH=/home/sandboxshift/.local/bin:$PATH
