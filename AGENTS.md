@@ -134,12 +134,17 @@ network:
     - pypi.org
     - api.github.com
   # Use ["*"] to allow all outbound traffic (disables Security Layer 4)
+  # NOTE: network.allow has no effect on Fargate — outbound is controlled
+  # by VPC routing and security groups, not by SandboxShift.
 
 resources:
   cpu: 2
   memory: 4GB
   min_cpu: 4              # burst to cloud if local has fewer CPUs
   min_memory: 8GB         # burst to cloud if local has less available RAM
+  # NOTE: cpu and memory only enforce cgroups limits on local Podman.
+  # They have no effect on Fargate — CPU/memory is fixed in the Terraform
+  # task definition. See README for valid Fargate CPU/memory combinations.
 
 sensitivity:
   level: auto             # auto-detect sensitive data
@@ -382,7 +387,7 @@ sandboxshift/
 | 59 | Terraform distribution in setup script | Always download pinned Terraform 1.5.7 to `~/.sandboxshift/bin/terraform` using Python `urllib` + `zipfile` (no curl, no unzip, no system Terraform required); version cached — skipped if already correct; all `terraform` invocations in setup script use `$TF_BIN` | Eliminates version mismatch bugs entirely; Python is the only binary dependency needed to bootstrap the download; consistent behaviour regardless of whether user has Terraform installed | 2026-03-21 |
 | 60 | Python venv isolation in setup script | Create isolated venv at `~/.sandboxshift/venv/`; install sandboxshift into it; symlink CLI to `~/.sandboxshift/bin/sandboxshift`; user adds `~/.sandboxshift/bin` to PATH once | Keeps user's global Python env clean; single PATH entry exposes both `sandboxshift` CLI and `terraform` binary; works for all developers not just DevOps | 2026-03-21 |
 | 61 | V1 base images | Docker Hub official slim: `python:3.11-slim`, `node:20-slim`, multi = `python:3.11-slim` + NodeSource nodejs 20 | Chainguard distroless has no shell; :latest-dev variant (adds BusyBox) proved fragile in practice; Docker Hub official slim images have /bin/sh, apt, pip natively and are always publicly available without auth; non-root UID 10000 added in Dockerfile for Layer 2 security; Chainguard deferred to V2 | 2026-03-21 |
-| 62 | Fargate per-run CPU/memory | Pass `cpu_limit` (×1024 → ECS CPU units string) and `memory_limit_mb` (string) as task-level `overrides.cpu`/`overrides.memory` in `ecs.run_task()` | Allows per-run resource sizing without modifying the Terraform task definition; `resources.cpu`/`resources.memory` now work consistently for both local (Podman cgroups) and cloud (ECS task override); Fargate requires valid CPU/memory combinations — invalid combos fail fast at ECS level | 2026-03-22 |
+| 62 | Fargate per-run CPU/memory | **CORRECTED 2026-03-22** — `overrides.cpu` / `overrides.memory` in `run_task()` are **EC2-only** and cause `InvalidParameterException` on Fargate. Removed from `_run_ecs_task()`. `resources.cpu` / `resources.memory` in sandboxshift.yaml only enforce Podman cgroup limits in local mode — they have no effect on Fargate runs. Fargate CPU/memory is fixed in the Terraform task definition. | 2026-03-22 |
 | 63 | `--mode local/cloud/auto` CLI flag + `sandbox.mode` YAML key | `--mode local` → `BurstEngine(ram_threshold_gb=0.0)` (available RAM always ≥ 0 → always local); `--mode cloud` → `BurstEngine(ram_threshold_gb=float("inf"))` (available RAM never ≥ ∞ → always cloud); `--mode auto` (default) → check YAML `sandbox.mode` key (parsed as `sandbox_mode` in config loader dict), then fall back to `--ram-threshold`. CLI `--mode` always wins over YAML. Neither `--mode cloud` nor `sandbox.mode: cloud` can override sensitivity FORCE_LOCAL (Layer 6 is immutable). No changes to `SandboxConfig`, `BurstEngine`, or `SandboxManager` — translation is done entirely in `_run_async()` in `cli/main.py`. | 2026-03-22 |
 
 ---
