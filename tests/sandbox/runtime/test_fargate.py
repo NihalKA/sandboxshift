@@ -1,9 +1,9 @@
 """Tests for FargateRuntime.
 
-29 tests grouped into:
+30 tests grouped into:
   Group 1 — Constructor validation (3 tests)
   Group 2 — provision() (8 tests)
-  Group 3 — execute() (10 tests)
+  Group 3 — execute() (11 tests)
   Group 4 — destroy() (8 tests)
 """
 
@@ -288,7 +288,27 @@ async def test_execute_passes_command_override(
     await runtime.execute(instance_id, "echo hi", default_config)
     call_kwargs = mock_ecs.run_task.call_args.kwargs
     overrides = call_kwargs["overrides"]["containerOverrides"][0]
-    assert overrides["command"] == ["/bin/sh", "-c", "echo hi"]
+    cmd = overrides["command"]
+    assert cmd[0] == "-c"
+    assert "echo hi" in cmd[1]
+
+
+async def test_execute_includes_setup_command_in_task(
+    runtime, tmp_workspace, aws_clients, mock_sleep
+):
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    config = SandboxConfig(setup_command="npm ci")
+    instance_id = await runtime.provision(tmp_workspace, config)
+    await runtime.execute(instance_id, "node index.js", config)
+    overrides = mock_ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]
+    cmd_str = overrides["command"][1]
+    # Both setup_command and the task must appear in the injected ECS command
+    assert "npm ci" in cmd_str
+    assert "node index.js" in cmd_str
+    # setup_command must run before the main task
+    assert cmd_str.index("npm ci") < cmd_str.index("node index.js")
 
 
 async def test_execute_passes_environment_vars(

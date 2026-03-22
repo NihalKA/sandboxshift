@@ -595,10 +595,11 @@ class FargateRuntime(Runtime):
     ) -> str:
         """Launch an ECS Fargate task and return its task ARN.
 
-        The injected command runs three stages in sequence:
+        The injected command runs up to four stages in sequence:
           1. _S3_DOWNLOAD_BOOTSTRAP — download workspace from S3 into /workspace
           2. _S3_DEPS_BOOTSTRAP     — cd /workspace, pip/npm install if manifests present
-          3. task                   — the user's command
+          3. config.setup_command   — optional user pre-task command (if set, e.g. "npm ci")
+          4. task                   — the user's command
 
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
@@ -607,7 +608,12 @@ class FargateRuntime(Runtime):
         apps can read process.env.PORT (Node) or $PORT without hardcoding the
         port number. Uses the first configured container port.
         """
-        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {_S3_DEPS_BOOTSTRAP} && {task}"
+        user_task = (
+            f"{state.config.setup_command} && {task}"
+            if state.config.setup_command
+            else task
+        )
+        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {_S3_DEPS_BOOTSTRAP} && {user_task}"
 
         # Server mode: attach the server SG (ALL TCP inbound) alongside the
         # standard batch SG. Batch mode: batch SG only.
