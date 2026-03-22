@@ -46,6 +46,46 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 
 **Everything else (Terraform, pip install, venv) is handled automatically by the setup script.**
 
+### Podman setup (macOS / Windows)
+
+On **Linux**, rootless Podman works out of the box after install. On **macOS and Windows**, Podman needs a lightweight VM called a "machine" before it can run containers:
+
+```bash
+podman machine init      # create the VM (once, ~500 MB download)
+podman machine start     # start it (run this after every reboot, or set it to auto-start)
+podman info              # verify it's running — look for "host.os: linux" in the output
+```
+
+To start the machine automatically on login:
+```bash
+podman machine set --rootful=false   # keep rootless mode
+# macOS: the machine starts automatically after 'podman machine start' once
+```
+
+For full details and troubleshooting see the [Podman Machine documentation](https://docs.podman.io/en/latest/markdown/podman-machine.1.html).
+
+### AWS credentials (cloud burst only)
+
+Before running `./sandboxshift-setup.sh cloud`, your AWS CLI must be authenticated. Two common ways:
+
+**Option A — configure a default profile** (interactive, prompts for your access key and secret):
+```bash
+aws configure
+# AWS Access Key ID: AKIA...
+# AWS Secret Access Key: ....
+# Default region name: us-east-1
+# Default output format: json
+```
+
+**Option B — use a named profile** (if you manage multiple AWS accounts):
+```bash
+export AWS_PROFILE=my-sandboxshift-profile
+```
+
+You can also use IAM Identity Center (SSO), environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), or an EC2/EC2-equivalent instance role. SandboxShift calls `boto3.Session()` with no hardcoded credentials — it picks up whatever the AWS SDK finds. For full credential setup options see the [AWS CLI configuration docs](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html).
+
+---
+
 ```bash
 git clone https://github.com/NihalKA/sandboxshift
 cd sandboxshift
@@ -195,9 +235,8 @@ network:
 resources:
   # -- Container limits: applied to BOTH local and cloud --
   # Local:  caps Podman container CPU/RAM via cgroups
-  # Cloud:  passed as ECS task-level overrides on every run_task call (Decision #62)
-  #         so each run can use a different size without modifying the Terraform
-  #         task definition. Fargate requires valid CPU/memory combinations.
+  # Cloud:  passed as ECS task-level overrides on every run_task call
+  #         Fargate requires valid CPU/memory combinations — see table below.
   cpu: 2                     # CPU cores (local: Podman cgroup; cloud: ECS task override — 2 = 2048 CPU units)
   memory: 4GB                # RAM cap — also accepts "4096MB" or 4096 (MB int)
 
@@ -214,10 +253,26 @@ ports:
 
 **Key facts:**
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
-- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via ECS task-level overrides on every `run_task` call (no Terraform re-apply needed). Fargate requires valid CPU/memory combinations (e.g. 2 vCPU → 4–16 GB RAM)
+- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via ECS task-level overrides on every `run_task` call (no Terraform re-apply needed)
 - `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
 - `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
 - `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
+
+### Fargate valid CPU / memory combinations
+
+When running in cloud mode, `resources.cpu` and `resources.memory` must be a valid Fargate combination. Invalid combos are rejected immediately by ECS.
+
+| CPU (`resources.cpu`) | Min memory | Max memory |
+|-----------------------|-----------|------------|
+| 0.25 vCPU | 512 MB | 2 GB |
+| 0.5 vCPU | 1 GB | 4 GB |
+| 1 vCPU | 2 GB | 8 GB |
+| 2 vCPU | 4 GB | 16 GB |
+| 4 vCPU | 8 GB | 30 GB |
+| 8 vCPU | 16 GB | 60 GB |
+| 16 vCPU | 32 GB | 120 GB |
+
+For the full list and memory increment rules see the [AWS Fargate task size documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html).
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
@@ -236,7 +291,7 @@ The script manages everything:
 4. Writes `~/.sandboxshift/fargate.env` with all 8 connection variables
 5. The CLI auto-loads `fargate.env` on every run — no `export` needed ever
 
-**Only prerequisite for cloud:** AWS CLI configured (`aws configure`).
+**Only prerequisite for cloud:** AWS CLI authenticated (see [AWS credentials](#aws-credentials-cloud-burst-only) above).
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md)
 
@@ -259,8 +314,8 @@ sandboxshift run <workspace> <task> [options]
 | `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
 | `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
-| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.memory`. |
-| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.cpu`. |
+| `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.memory`. Must be a valid Fargate combination with `--cpu` when running in cloud. |
+| `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.cpu`. Must be a valid Fargate combination with `--memory-mb` when running in cloud. |
 | `--ram-threshold N` | `1024` | **Auto-mode burst trigger (MB).** If available host RAM < N MB, burst to cloud. Only used when `--mode auto` (and YAML `sandbox.mode: auto`). Use `--mode cloud` / `--mode local` for a cleaner toggle. |
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
