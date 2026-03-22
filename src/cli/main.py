@@ -1,4 +1,4 @@
-"""SandboxShift CLI — sandboxshift run / sandboxshift audit tail / sandboxshift stop."""
+"""SandboxShift CLI — sandboxshift run / sandboxshift list / sandboxshift stop / sandboxshift audit tail."""
 
 from __future__ import annotations
 
@@ -352,6 +352,53 @@ def _cmd_run(args: argparse.Namespace) -> None:
     sys.exit(result.task_result.exit_code)
 
 
+def _cmd_list(args: argparse.Namespace) -> None:  # noqa: ARG001
+    """Handle 'sandboxshift list' subcommand.
+
+    Reads ~/.sandboxshift/servers.json and prints a table of running cloud
+    server tasks. Each row shows: instance ID, public URL(s), and region.
+
+    server.json is written by FargateRuntime._save_server_info() every time
+    a server task starts, and cleaned up by 'sandboxshift stop'. If the user
+    closed their terminal without stopping, entries remain here and can be
+    stopped with 'sandboxshift stop <instance_id>'.
+    """
+    if not _SERVERS_FILE.exists():
+        print("No running cloud servers found.")
+        return
+
+    try:
+        servers: dict = json.loads(_SERVERS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print(f"Error reading servers file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not servers:
+        print("No running cloud servers found.")
+        return
+
+    # Column widths
+    id_w = 24
+    url_w = 45
+
+    print(f"{'INSTANCE ID':<{id_w}}  {'URL(S)':<{url_w}}  REGION")
+    print("-" * (id_w + url_w + 12))
+    for sid, info in servers.items():
+        public_ip = info.get("public_ip")
+        ports = info.get("ports", [])
+        region = info.get("region", "unknown")
+        if public_ip and ports:
+            urls = "  ".join(f"http://{public_ip}:{c}" for _, c in ports)
+        elif public_ip:
+            urls = public_ip
+        else:
+            urls = "(IP pending — check ECS console)"
+        print(f"{sid:<{id_w}}  {urls:<{url_w}}  {region}")
+
+    print()
+    print(f"Use 'sandboxshift stop <instance_id>' to stop a running server.")
+
+
 def _cmd_stop(args: argparse.Namespace) -> None:
     """Handle 'sandboxshift stop <instance_id>' subcommand.
 
@@ -519,6 +566,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to audit log file (default: ~/.sandboxshift/audit.log)",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    # ── sandboxshift list ─────────────────────────────────────────────────
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List running cloud server tasks",
+    )
+    list_parser.set_defaults(func=_cmd_list)
 
     # ── sandboxshift stop ─────────────────────────────────────────────────
     stop_parser = subparsers.add_parser(

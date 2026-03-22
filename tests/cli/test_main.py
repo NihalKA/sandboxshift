@@ -571,3 +571,60 @@ def test_skip_sensitivity_check_flag_passes_to_config(
         main()
     call_kwargs = instance.run.call_args.kwargs
     assert call_kwargs["config"].skip_sensitivity_check is True
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — sandboxshift list
+# ---------------------------------------------------------------------------
+
+def test_list_no_servers_file_prints_message(tmp_path: Path, monkeypatch, capsys):
+    """When servers.json does not exist, 'list' prints a friendly message and exits 0."""
+    monkeypatch.setattr(_cli_main_module, "_SERVERS_FILE", tmp_path / "servers.json")
+    with patch("sys.argv", ["sandboxshift", "list"]):
+        main()  # must NOT raise SystemExit
+    assert "No running cloud servers" in capsys.readouterr().out
+
+
+def test_list_empty_servers_prints_message(tmp_path: Path, monkeypatch, capsys):
+    """When servers.json exists but is empty ({}), 'list' prints a friendly message."""
+    servers_file = tmp_path / "servers.json"
+    servers_file.write_text("{}")
+    monkeypatch.setattr(_cli_main_module, "_SERVERS_FILE", servers_file)
+    with patch("sys.argv", ["sandboxshift", "list"]):
+        main()
+    assert "No running cloud servers" in capsys.readouterr().out
+
+
+def test_list_prints_instance_id_and_url(tmp_path: Path, monkeypatch, capsys):
+    """'list' prints the instance ID, public URL(s), and region for each server."""
+    servers_file = tmp_path / "servers.json"
+    servers_file.write_text(json.dumps({
+        "ss-abc123def456": {
+            "public_ip": "1.2.3.4",
+            "ports": [[3000, 3000]],
+            "region": "us-east-1",
+            "ecs_task_arn": "arn:aws:ecs:us-east-1:123:task/xyz",
+            "cluster_arn": "arn:aws:ecs:us-east-1:123:cluster/c",
+            "s3_bucket": "mybucket",
+            "s3_prefix": "workspace/ss-abc123def456/",
+        }
+    }))
+    monkeypatch.setattr(_cli_main_module, "_SERVERS_FILE", servers_file)
+    with patch("sys.argv", ["sandboxshift", "list"]):
+        main()
+    out = capsys.readouterr().out
+    assert "ss-abc123def456" in out
+    assert "http://1.2.3.4:3000" in out
+    assert "us-east-1" in out
+
+
+def test_list_corrupt_servers_file_exits_1(tmp_path: Path, monkeypatch, capsys):
+    """Corrupt servers.json → SystemExit(1) with an error message on stderr."""
+    servers_file = tmp_path / "servers.json"
+    servers_file.write_text("NOT VALID JSON {{{{")
+    monkeypatch.setattr(_cli_main_module, "_SERVERS_FILE", servers_file)
+    with patch("sys.argv", ["sandboxshift", "list"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    assert exc_info.value.code == 1
+    assert "Error" in capsys.readouterr().err
