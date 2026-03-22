@@ -85,10 +85,10 @@ sandboxshift run /path/to/your/project "pytest tests/"
 sandboxshift run /path/to/node-app "node index.js" --port 3000
 
 # Force cloud burst to Fargate
-sandboxshift run /path/to/project "python main.py" --ram-threshold 999999
+sandboxshift run /path/to/project "python main.py" --mode cloud
 
 # Run a cloud server and tail logs live
-sandboxshift run /path/to/node-app "node index.js" --port 3000 --ram-threshold 999999
+sandboxshift run /path/to/node-app "node index.js" --port 3000 --mode cloud
 # Ctrl+C to stop tailing (server keeps running)
 sandboxshift stop <instance_id>
 ```
@@ -171,6 +171,11 @@ sandbox:
   timeout: 1800              # kill sandbox after this many seconds (default: 1800)
   setup: "npm ci"            # run this before your main task (e.g. install deps)
   skip_sensitivity_check: false  # set true to bypass secret scanning (use with caution)
+  mode: auto                 # local | cloud | auto (default: auto)
+                             # local  = always run in Podman, ignore RAM
+                             # cloud  = always burst to Fargate, ignore RAM
+                             # auto   = decide by available RAM (uses --ram-threshold)
+                             # CLI --mode overrides this. Never overrides sensitive-data detection.
 
 workspace:
   readonly: false            # true = workspace mounted read-only inside container
@@ -249,13 +254,14 @@ sandboxshift run <workspace> <task> [options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--mode MODE` | `auto` | Run mode: `local` (always Podman, ignore RAM), `cloud` (always Fargate, ignore RAM), `auto` (decide by available RAM). YAML `sandbox.mode` applies when CLI is `auto`. **Never overrides sensitive-data detection** — if secrets are found, local is always forced. |
 | `--port PORT` | — | Expose a port. Accepts bare `3000` (maps 3000→3000) or `HOST:CONTAINER` e.g. `8080:3000`. Repeat for multiple ports. Combined with YAML `ports:`. |
 | `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
 | `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
 | `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.memory`. |
 | `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: ECS task-level override per run. Overrides YAML `resources.cpu`. |
-| `--ram-threshold N` | `1024` | **Burst trigger (MB).** If available host RAM < N MB, burst to cloud. Default is 1024 MB (1 GB). Use `999999` to always burst, `0` to never burst. |
+| `--ram-threshold N` | `1024` | **Auto-mode burst trigger (MB).** If available host RAM < N MB, burst to cloud. Only used when `--mode auto` (and YAML `sandbox.mode: auto`). Use `--mode cloud` / `--mode local` for a cleaner toggle. |
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
 
@@ -264,15 +270,23 @@ sandboxshift run <workspace> <task> [options]
 | Intent | Command |
 |--------|--------|
 | Auto (default) — local if RAM ≥ 1 GB, else cloud | `sandboxshift run /workspace "task"` |
-| Always burst to cloud | `sandboxshift run /workspace "task" --ram-threshold 999999` |
-| Always stay local | `sandboxshift run /workspace "task" --ram-threshold 0` |
+| Always run locally | `sandboxshift run /workspace "task" --mode local` |
+| Always burst to cloud | `sandboxshift run /workspace "task" --mode cloud` |
+| Fine-grained RAM threshold | `sandboxshift run /workspace "task" --ram-threshold 8192` |
+| Pin workspace to always run locally (YAML) | Set `sandbox.mode: local` in `sandboxshift.yaml` |
+| Pin workspace to always burst (YAML) | Set `sandbox.mode: cloud` in `sandboxshift.yaml` |
 | Hard cloud requirement via YAML | Set `resources.min_memory: 8GB` in `sandboxshift.yaml` |
 
 > **Note:** `--ram-threshold` compares against **available** RAM right now (not total installed RAM). On a 16 GB machine with many apps open, available might be 4–6 GB.
+>
+> **Security:** `--mode cloud` and `sandbox.mode: cloud` never override sensitive-data detection. If SandboxShift finds secrets in the workspace, it always forces local regardless of the mode flag.
 
 ### Other commands
 
 ```bash
+# List running cloud server tasks
+sandboxshift list
+
 # Stop a running cloud server task
 sandboxshift stop <instance_id>
 
@@ -289,7 +303,8 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 ### YAML vs CLI precedence
 
 | Setting | YAML key | CLI flag | Priority |
-|---------|----------|----------|---------|
+|---------|----------|----------|----------|
+| Run mode | `sandbox.mode` | `--mode` | CLI wins. `--mode auto` (default) defers to YAML; when YAML also absent, uses `--ram-threshold`. Neither can override sensitive-data detection (security Layer 6). |
 | Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
 | Setup command | `sandbox.setup` | `--setup` | CLI wins |
 | Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
@@ -298,9 +313,9 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 | Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task override per run). |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
 | Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
-| Min CPU (burst) | `resources.min_cpu` | no CLI flag | YAML only |
-| Min memory (burst) | `resources.min_memory` | no CLI flag | YAML only |
-| Burst threshold | no YAML key | `--ram-threshold` | CLI only |
+| Min CPU (burst trigger) | `resources.min_cpu` | no CLI flag | YAML only |
+| Min memory (burst trigger) | `resources.min_memory` | no CLI flag | YAML only |
+| RAM threshold (fine-grained, auto-mode only) | no YAML key | `--ram-threshold` | CLI only. Only used when both `--mode` and `sandbox.mode` are `auto`. |
 | Audit log path | no YAML key | `--audit-log` | CLI / env var only |
 
 ---

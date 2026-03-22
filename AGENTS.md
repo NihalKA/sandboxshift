@@ -113,6 +113,8 @@ Auto-detection logic (Decision #19):
 --mode auto     → Decides based on available RAM (DEFAULT)
 ```
 
+YAML equivalent: `sandbox.mode: local|cloud|auto` (CLI `--mode` wins when explicitly set).
+
 ---
 
 ## Sandbox Configuration (sandboxshift.yaml)
@@ -121,7 +123,7 @@ Auto-detection logic (Decision #19):
 sandbox:
   runtime: auto           # auto-detected from workspace
   timeout: 1800           # kill after 30 mins
-  mode: auto              # local first, cloud if needed
+  mode: auto              # local | cloud | auto (default: auto)
 
 workspace:
   mount: ./src            # only this folder
@@ -206,7 +208,7 @@ sandboxshift/
 │   │   └── app.py               ← create_app() factory with async lifespan wiring
 │   ├── cli/                     ← sandboxshift CLI ✓ BUILT
 │   │   ├── __init__.py          ← exports main
-│   │   └── main.py              ← argparse CLI: run + audit tail subcommands
+│   │   └── main.py              ← argparse CLI: run + list + stop + audit tail subcommands
 │   ├── observability/           ← audit trail, metrics
 │   │   ├── __init__.py
 │   │   └── audit.py             ← AuditLogger ✓ BUILT
@@ -248,7 +250,7 @@ sandboxshift/
 │   │   └── test_routes.py       ← 29 tests across 8 groups
 │   ├── cli/                     ← CLI tests ✓ BUILT
 │   │   ├── __init__.py
-│   │   └── test_main.py         ← 33 tests across 8 groups
+│   │   └── test_main.py         ← tests across 10 groups
 │   ├── observability/           ← AuditLogger tests ✓ BUILT
 │   │   ├── __init__.py
 │   │   └── test_audit.py        ← AuditLogger tests ✓ BUILT (18 tests)
@@ -381,6 +383,7 @@ sandboxshift/
 | 60 | Python venv isolation in setup script | Create isolated venv at `~/.sandboxshift/venv/`; install sandboxshift into it; symlink CLI to `~/.sandboxshift/bin/sandboxshift`; user adds `~/.sandboxshift/bin` to PATH once | Keeps user's global Python env clean; single PATH entry exposes both `sandboxshift` CLI and `terraform` binary; works for all developers not just DevOps | 2026-03-21 |
 | 61 | V1 base images | Docker Hub official slim: `python:3.11-slim`, `node:20-slim`, multi = `python:3.11-slim` + NodeSource nodejs 20 | Chainguard distroless has no shell; :latest-dev variant (adds BusyBox) proved fragile in practice; Docker Hub official slim images have /bin/sh, apt, pip natively and are always publicly available without auth; non-root UID 10000 added in Dockerfile for Layer 2 security; Chainguard deferred to V2 | 2026-03-21 |
 | 62 | Fargate per-run CPU/memory | Pass `cpu_limit` (×1024 → ECS CPU units string) and `memory_limit_mb` (string) as task-level `overrides.cpu`/`overrides.memory` in `ecs.run_task()` | Allows per-run resource sizing without modifying the Terraform task definition; `resources.cpu`/`resources.memory` now work consistently for both local (Podman cgroups) and cloud (ECS task override); Fargate requires valid CPU/memory combinations — invalid combos fail fast at ECS level | 2026-03-22 |
+| 63 | `--mode local/cloud/auto` CLI flag + `sandbox.mode` YAML key | `--mode local` → `BurstEngine(ram_threshold_gb=0.0)` (available RAM always ≥ 0 → always local); `--mode cloud` → `BurstEngine(ram_threshold_gb=float("inf"))` (available RAM never ≥ ∞ → always cloud); `--mode auto` (default) → check YAML `sandbox.mode` key (parsed as `sandbox_mode` in config loader dict), then fall back to `--ram-threshold`. CLI `--mode` always wins over YAML. Neither `--mode cloud` nor `sandbox.mode: cloud` can override sensitivity FORCE_LOCAL (Layer 6 is immutable). No changes to `SandboxConfig`, `BurstEngine`, or `SandboxManager` — translation is done entirely in `_run_async()` in `cli/main.py`. | 2026-03-22 |
 
 ---
 
