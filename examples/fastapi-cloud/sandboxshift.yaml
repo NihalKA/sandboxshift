@@ -1,0 +1,37 @@
+# sandboxshift.yaml — fastapi-cloud example
+#
+# Runs the FastAPI server on AWS Fargate.
+# Cloud burst must be set up first: ./sandboxshift-setup.sh cloud
+#
+# After the task starts:
+#   sandboxshift list                       → get the public IP and URL
+#   curl http://<public-ip>:8000/docs       → interactive Swagger UI
+#   sandboxshift stop <instance_id>         → stop when done
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/fastapi-cloud \\
+#     "uvicorn main:app --host 0.0.0.0 --port 8000" \\
+#     --mode cloud \\
+#     --port 8000 \\
+#     --setup "pip install -r requirements.txt"
+
+sandbox:
+  mode: cloud
+  timeout: 3600
+  setup: "pip install -r requirements.txt"
+
+workspace:
+  readonly: false
+
+network:
+  allow:
+    - pypi.org
+    - files.pythonhosted.org
+
+resources:
+  # Fargate: 1 vCPU requires 2–8 GB memory.
+  cpu: 1.0
+  memory: 2GB
+
+ports:
+  - 8000:8000

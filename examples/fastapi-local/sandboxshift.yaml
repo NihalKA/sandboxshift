@@ -1,0 +1,32 @@
+# sandboxshift.yaml — fastapi-local example
+#
+# Runs a FastAPI server locally in Podman.
+# Open http://localhost:8000/docs for the interactive Swagger UI.
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/fastapi-local \\
+#     "uvicorn main:app --host 0.0.0.0 --port 8000" \\
+#     --mode local \\
+#     --port 8000 \\
+#     --setup "pip install -r requirements.txt"
+
+sandbox:
+  mode: local
+  timeout: 3600
+  setup: "pip install -r requirements.txt"
+
+workspace:
+  readonly: false
+
+network:
+  allow:
+    - pypi.org     # needed for pip install during setup
+    - files.pythonhosted.org
+
+resources:
+  cpu: 1.0
+  memory: 512MB
+
+ports:
+  - 8000:8000     # http://localhost:8000  (host → container)
+                  # SandboxShift also injects PORT=8000 as an env var

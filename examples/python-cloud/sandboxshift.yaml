@@ -1,0 +1,29 @@
+# sandboxshift.yaml — python-cloud example
+#
+# This workspace always runs on AWS Fargate — never locally.
+# Cloud burst must be set up first: ./sandboxshift-setup.sh cloud
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/python-cloud "python app.py" \\
+#     --mode cloud \\
+#     --cpu 4.0 \\
+#     --memory-mb 8192 \\
+#     --setup "pip install -r requirements.txt"
+
+sandbox:
+  mode: cloud          # always burst to Fargate, ignore local RAM
+  timeout: 600
+  setup: "pip install -r requirements.txt"
+
+workspace:
+  readonly: false
+
+network:
+  allow:
+    - pypi.org         # needed to install numpy during setup
+
+resources:
+  # Fargate: 4 vCPU requires 8–30 GB memory.
+  # See README or https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html
+  cpu: 4.0
+  memory: 8GB

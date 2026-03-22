@@ -1,0 +1,2 @@
+fastapi[standard]==0.111.0
+# fastapi[standard] includes uvicorn, httpx, and pydantic — everything needed to run this app.

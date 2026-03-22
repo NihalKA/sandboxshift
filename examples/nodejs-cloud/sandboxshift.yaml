@@ -1,0 +1,35 @@
+# sandboxshift.yaml — nodejs-cloud example
+#
+# Runs the Express server on AWS Fargate.
+# Cloud burst must be set up first: ./sandboxshift-setup.sh cloud
+#
+# After the task starts, run:
+#   sandboxshift list             → get the public IP and URL
+#   sandboxshift stop <id>        → stop the server when done
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/nodejs-cloud "node index.js" \\
+#     --mode cloud \\
+#     --port 3000 \\
+#     --setup "npm ci"
+
+sandbox:
+  mode: cloud
+  timeout: 3600
+  setup: "npm ci"
+
+workspace:
+  readonly: false
+
+network:
+  allow:
+    - registry.npmjs.org
+    - registry.yarnpkg.com
+
+resources:
+  # Fargate: 1 vCPU requires 2–8 GB memory.
+  cpu: 1.0
+  memory: 2GB
+
+ports:
+  - 3000:3000

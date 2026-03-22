@@ -1,0 +1,23 @@
+# sandboxshift.yaml — python-local example
+#
+# This workspace is pinned to always run locally inside Podman.
+# No cloud credentials needed.
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/python-local "python app.py" --mode local
+
+sandbox:
+  mode: local          # always run in Podman, never burst to cloud
+  timeout: 120         # kill after 2 minutes (more than enough for this script)
+  # setup: "pip install -r requirements.txt"   # uncomment if you add deps
+
+workspace:
+  readonly: false      # app.py only reads — set true for extra safety
+
+network:
+  allow:
+    - pypi.org         # needed if setup installs packages
+
+resources:
+  cpu: 1.0
+  memory: 512MB

@@ -1,0 +1,7 @@
+# No third-party deps needed for this example.
+# Add your dependencies here and set sandbox.setup in sandboxshift.yaml
+# (or use --setup on the CLI) to install them before the task runs.
+#
+# Example:
+#   requests==2.31.0
+#   pandas==2.2.0

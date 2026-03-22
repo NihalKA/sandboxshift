@@ -1,0 +1,31 @@
+# sandboxshift.yaml — nodejs-local example
+#
+# Runs a long-lived Express server locally in Podman.
+# Port 3000 is exposed on your host — open http://localhost:3000 to test.
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/nodejs-local "node index.js" \\
+#     --mode local \\
+#     --port 3000 \\
+#     --setup "npm ci"
+
+sandbox:
+  mode: local
+  timeout: 3600        # 1 hour — long-lived server
+  setup: "npm ci"      # install express before starting the server
+
+workspace:
+  readonly: false
+
+network:
+  allow:
+    - registry.npmjs.org   # needed for npm ci
+    - registry.yarnpkg.com
+
+resources:
+  cpu: 1.0
+  memory: 512MB
+
+ports:
+  - 3000:3000          # host:3000 → container:3000
+                       # SandboxShift also injects PORT=3000 as an env var
