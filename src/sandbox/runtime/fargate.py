@@ -5,12 +5,14 @@ any shared SandboxShift infrastructure.
 
 Lifecycle (batch mode — no ports configured):
   provision()  →  upload workspace to the persistent S3 bucket under a
-                  unique prefix (workspace/{instance_id}/), store state
+                  unique prefix (workspace/{instance_id}/), register a
+                  fresh ECS task definition for this run, store state
   execute()    →  launch ECS Fargate task; the injected command first downloads
                   the workspace from S3 into /workspace, installs dependencies
                   (pip/npm if manifest present), then runs the user task;
                   poll until STOPPED; fetch CloudWatch logs; return TaskResult
-  destroy()    →  stop task, delete the workspace prefix from S3, clear state
+  destroy()    →  stop task, deregister the task definition, delete the workspace
+                  prefix from S3, clear state
 
 Lifecycle (server mode — ports: configured in sandboxshift.yaml):
   provision()  →  same as batch
@@ -19,8 +21,16 @@ Lifecycle (server mode — ports: configured in sandboxshift.yaml):
                   tail CloudWatch logs live (blocks until Ctrl+C — server stays
                   running); save instance info to ~/.sandboxshift/servers.json;
                   return TaskResult immediately — task keeps running in Fargate
-  destroy()    →  delete S3 prefix (workspace already downloaded), clear state;
+  destroy()    →  deregister the task definition, delete S3 prefix (workspace
+                  already downloaded), clear state;
                   does NOT stop the ECS task (user calls `sandboxshift stop <id>`)
+
+Dynamic task definition (Decision #64):
+  FargateRuntime registers a new ECS task definition in provision() using
+  ecs:RegisterTaskDefinition, with the exact CPU/memory requested by the user.
+  The registered ARN is stored in state and used by execute(). destroy() always
+  calls ecs:DeregisterTaskDefinition to clean up. This means any valid Fargate
+  CPU/memory combination works without any Terraform changes.
 
 AWS credentials are read exclusively from the environment (IAM role, AWS_PROFILE,
 or AWS_ACCESS_KEY_ID env vars). Credentials are NEVER accepted as constructor
@@ -178,7 +188,7 @@ class _FargateInstanceState:
     s3_prefix: str      # e.g. "workspace/ss-abc123def456/"
     region: str
     cluster_arn: str
-    task_def_arn: str
+    registered_task_def_arn: str   # registered dynamically in provision() (Decision #64)
     log_group: str
     config: SandboxConfig
     ecs_task_arn: str | None = None   # written by execute() after task starts
@@ -200,6 +210,13 @@ class FargateRuntime(Runtime):
     CloudWatch logs are fetched after completion (batch mode), and the S3
     prefix is cleaned up in destroy().
 
+    Dynamic task definitions (Decision #64):
+    FargateRuntime registers a fresh ECS task definition in provision() with
+    the exact CPU/memory/image requested by the user. This allows any valid
+    Fargate CPU/memory combination without Terraform changes. The task def
+    is deregistered in destroy() — automatically for batch tasks, and when
+    `sandboxshift stop <id>` is called for server tasks.
+
     Server mode (ports: configured):
     When config.ports is non-empty, execute() switches to server mode:
     the task is launched with server_security_group_id appended (ALL TCP
@@ -207,20 +224,21 @@ class FargateRuntime(Runtime):
     The tail blocks until Ctrl+C — the server keeps running. Use
     `sandboxshift stop <instance_id>` to stop the Fargate task.
 
-    Resource sizing for Fargate (CPU / memory) is fixed in the Terraform task
-    definition. The resources.cpu and resources.memory fields in
-    sandboxshift.yaml only affect local Podman (cgroups) — they have no effect
-    on cloud runs. Fargate does not support per-run task-level cpu/memory
-    overrides via run_task() — those fields are EC2-only.
-
     Args:
         cluster_arn:              ARN of the ECS cluster to run tasks in.
-        task_def_arn:             ARN of the ECS task definition (family:revision).
+        execution_role_arn:       IAM execution role ARN — allows Fargate to pull
+                                  images and write CloudWatch logs.
+        task_role_arn:            IAM task role ARN — grants the container S3
+                                  workspace access.
         subnet_ids:               VPC subnet IDs for the Fargate task network interface.
         security_group_ids:       Security group IDs for the Fargate task (batch).
         region:                   AWS region (e.g. 'us-east-1').
         log_group:                CloudWatch Logs log group name.
         workspace_bucket:         Name of the persistent S3 bucket for workspace staging.
+        task_family:              ECS task definition family prefix (e.g. 'sandboxshift-sandbox').
+                                  Each run registers family 'task_family-instance_id'.
+        ecr_image:                Full image URI to run (e.g. ECR URI or Docker Hub name).
+                                  If empty, defaults to 'sandboxshift/runtime-multi:latest'.
         server_security_group_id: Optional SG with ALL TCP inbound — attached only when
                                   ports are configured (server mode). If not set, server
                                   mode tasks run with the standard batch SG only (no
@@ -231,19 +249,23 @@ class FargateRuntime(Runtime):
     def __init__(
         self,
         cluster_arn: str,
-        task_def_arn: str,
+        execution_role_arn: str,
+        task_role_arn: str,
         subnet_ids: list[str],
         security_group_ids: list[str],
         region: str,
         log_group: str,
         workspace_bucket: str,
+        task_family: str = "sandboxshift-sandbox",
+        ecr_image: str = "",
         server_security_group_id: str | None = None,
         audit_logger: AuditLogger | None = None,
     ) -> None:
         # Validate required string params
         for param_name, value in [
             ("cluster_arn", cluster_arn),
-            ("task_def_arn", task_def_arn),
+            ("execution_role_arn", execution_role_arn),
+            ("task_role_arn", task_role_arn),
             ("region", region),
             ("log_group", log_group),
             ("workspace_bucket", workspace_bucket),
@@ -260,12 +282,16 @@ class FargateRuntime(Runtime):
                 raise ValueError(f"{param_name!r} must not be empty")
 
         self._cluster_arn = cluster_arn
-        self._task_def_arn = task_def_arn
+        self._execution_role_arn = execution_role_arn
+        self._task_role_arn = task_role_arn
         self._subnet_ids = subnet_ids
         self._security_group_ids = security_group_ids
         self._region = region
         self._log_group = log_group
         self._workspace_bucket = workspace_bucket
+        self._task_family = task_family or "sandboxshift-sandbox"
+        # Resolve container image: use ecr_image if provided, else Docker Hub default.
+        self._ecr_image = ecr_image.strip() if ecr_image else "sandboxshift/runtime-multi:latest"
         self._server_security_group_id = server_security_group_id
         self._audit = audit_logger if audit_logger is not None else AuditLogger()
         self._instances: dict[str, _FargateInstanceState] = {}
@@ -280,7 +306,8 @@ class FargateRuntime(Runtime):
         """Provision a cloud sandbox.
 
         Uploads workspace files to the persistent S3 bucket under a unique
-        per-run prefix (workspace/{instance_id}/), skipping:
+        per-run prefix (workspace/{instance_id}/), then registers a fresh
+        ECS task definition for this run (Decision #64). Skips:
           - sensitive filenames (.env, .pem, .key)
           - .git directory
           - local-only dependency directories (node_modules, __pycache__, .venv,
@@ -300,7 +327,7 @@ class FargateRuntime(Runtime):
         Raises:
             FileNotFoundError: If workspace does not exist.
             ValueError:        If workspace (after filtering) exceeds 500 MB.
-            RuntimeError:      If S3 upload fails.
+            RuntimeError:      If S3 upload or task def registration fails.
         """
         if not workspace.exists():
             raise FileNotFoundError(f"workspace does not exist: {workspace}")
@@ -355,6 +382,17 @@ class FargateRuntime(Runtime):
             print()  # newline after inline progress
         _ok("Workspace uploaded")
 
+        # Register a fresh task definition for this run (Decision #64).
+        # CPU/memory/image are baked in at registration time — no overrides needed.
+        _step("Registering ECS task definition ...")
+        try:
+            registered_task_def_arn = await asyncio.to_thread(
+                self._register_task_definition, instance_id, config
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to register task definition: {e}") from e
+        _ok(f"Task definition registered: {registered_task_def_arn.split('/')[-1]}")
+
         image = _detect_image(workspace)  # audit-only
         is_server = bool(config.ports)
 
@@ -363,7 +401,7 @@ class FargateRuntime(Runtime):
             s3_prefix=s3_prefix,
             region=self._region,
             cluster_arn=self._cluster_arn,
-            task_def_arn=self._task_def_arn,
+            registered_task_def_arn=registered_task_def_arn,
             log_group=self._log_group,
             config=config,
             is_server=is_server,
@@ -375,6 +413,7 @@ class FargateRuntime(Runtime):
             "bucket": self._workspace_bucket,
             "s3_prefix": s3_prefix,
             "image_detected": image,
+            "task_def_arn": registered_task_def_arn,
             "workspace": str(workspace),
             "network_allow": config.network_allow,
             "is_server": is_server,
@@ -422,8 +461,10 @@ class FargateRuntime(Runtime):
     async def destroy(self, instance_id: str) -> None:
         """Destroy the sandbox. Idempotent — never raises.
 
-        Batch mode: stops the ECS task (if running) and deletes the S3 prefix.
-        Server mode: deletes the S3 prefix only — does NOT stop the ECS task.
+        Batch mode: stops the ECS task (if running), deregisters the task
+        definition, and deletes the S3 prefix.
+        Server mode: deregisters the task definition and deletes the S3 prefix
+        only — does NOT stop the ECS task.
         The task keeps running; user calls `sandboxshift stop <instance_id>` to stop it.
 
         Args:
@@ -436,6 +477,13 @@ class FargateRuntime(Runtime):
                 # Only stop the ECS task for batch mode. Server tasks keep running.
                 if state.ecs_task_arn and not state.is_server:
                     await asyncio.to_thread(self._stop_ecs_task, state)
+                # Deregister the task definition for both batch and server mode.
+                # For server mode this happens when `sandboxshift stop` calls destroy().
+                if state.registered_task_def_arn:
+                    await asyncio.to_thread(
+                        self._deregister_task_definition,
+                        state.registered_task_def_arn,
+                    )
                 await asyncio.to_thread(
                     self._delete_s3_prefix, state.bucket_name, state.s3_prefix
                 )
@@ -596,6 +644,66 @@ class FargateRuntime(Runtime):
         body = file_path.read_bytes()
         s3.put_object(Bucket=bucket_name, Key=key, Body=body)
 
+    def _register_task_definition(
+        self, instance_id: str, config: SandboxConfig
+    ) -> str:
+        """Register a fresh ECS task definition for this run. Returns the ARN.
+
+        The task definition family name is '{task_family}-{instance_id}' —
+        unique per run, enabling parallel runs and clean deregister on destroy.
+        CPU (float vCPUs → ECS CPU units = vCPUs * 1024) and memory (MB)
+        are baked in at registration time, so any valid Fargate combination
+        works without Terraform changes. (Decision #64)
+
+        The container image is self._ecr_image (resolved in __init__ from
+        the ecr_image constructor arg, defaulting to
+        'sandboxshift/runtime-multi:latest' if empty).
+        """
+        cpu_units = str(int(config.cpu_limit * 1024))
+        memory_mib = str(config.memory_limit_mb)
+        family = f"{self._task_family}-{instance_id}"
+
+        ecs = self._session.client("ecs", region_name=self._region)
+        response = ecs.register_task_definition(
+            family=family,
+            requiresCompatibilities=["FARGATE"],
+            networkMode="awsvpc",
+            cpu=cpu_units,
+            memory=memory_mib,
+            executionRoleArn=self._execution_role_arn,
+            taskRoleArn=self._task_role_arn,
+            containerDefinitions=[{
+                "name": "sandbox",
+                "image": self._ecr_image,
+                "essential": True,
+                "entryPoint": ["/bin/sh"],
+                "command": ["-c", "echo sandboxshift ready"],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": self._log_group,
+                        "awslogs-region": self._region,
+                        "awslogs-stream-prefix": "sandboxshift",
+                    }
+                },
+                "environment": [],
+            }]
+        )
+        return str(response["taskDefinition"]["taskDefinitionArn"])
+
+    def _deregister_task_definition(self, task_def_arn: str) -> None:
+        """Deregister an ECS task definition. Silently swallows all errors.
+
+        Called in destroy() for both batch and server mode. Failure to
+        deregister is non-fatal — the task definition will linger in ECS
+        but will not affect future runs (each run gets a unique family name).
+        """
+        try:
+            ecs = self._session.client("ecs", region_name=self._region)
+            ecs.deregister_task_definition(taskDefinition=task_def_arn)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _run_ecs_task(
         self, instance_id: str, task: str, state: _FargateInstanceState
     ) -> str:
@@ -607,11 +715,10 @@ class FargateRuntime(Runtime):
           3. config.setup_command   — optional user pre-task command (if set, e.g. "npm ci")
           4. task                   — the user's command
 
-        CPU and memory are NOT overridden per-run. Fargate rejects task-level
-        overrides.cpu / overrides.memory in run_task() — those fields are only
-        valid for the EC2 launch type. Resource sizing is fixed in the Terraform
-        task definition. config.cpu_limit / config.memory_limit_mb only affect
-        local Podman (cgroups); they have no effect on cloud runs.
+        The task definition was registered in provision() (Decision #64) with
+        the correct CPU/memory already baked in. No task-level overrides are
+        needed — the containerOverrides block holds only the command and
+        environment variables.
 
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
@@ -646,14 +753,10 @@ class FargateRuntime(Runtime):
                 {"name": "PORT", "value": str(state.config.ports[0][1])}
             )
 
-        # NOTE: cpu and memory are NOT passed as task-level overrides.
-        # Fargate ignores / rejects overrides.cpu and overrides.memory in
-        # run_task() — those fields are EC2-only and cause InvalidParameterException.
-        # CPU/memory for Fargate is fixed in the Terraform task definition.
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
             cluster=state.cluster_arn,
-            taskDefinition=state.task_def_arn,
+            taskDefinition=state.registered_task_def_arn,
             launchType="FARGATE",
             networkConfiguration={
                 "awsvpcConfiguration": {
@@ -805,7 +908,7 @@ class FargateRuntime(Runtime):
 
         print(
             f"{_C_BLUE}[sandboxshift]{_C_RESET} "
-            f"Streaming logs (Ctrl+C to stop tailing \u2014 server stays running):\n",
+            f"Streaming logs (Ctrl+C to stop tailing — server stays running):\n",
             flush=True,
         )
 
