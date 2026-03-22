@@ -152,11 +152,24 @@ _download_terraform() {
 
   step "  Fetching ${tf_url} ..."
   python3 - "$tf_url" "$tf_zip" <<'PYEOF'
-import urllib.request, sys, os
+import urllib.request, ssl, sys, os
+
+# macOS Python from python.org does not use the system certificate store by
+# default, causing SSLCertVerificationError. Fix: load /etc/ssl/cert.pem
+# (the macOS system root CA bundle, present since macOS 10.13 High Sierra)
+# into the SSL context explicitly. SSL verification is NOT disabled — all
+# server certificates are still fully verified against the system root CAs.
+ctx = ssl.create_default_context()
+if sys.platform == 'darwin' and os.path.exists('/etc/ssl/cert.pem'):
+    ctx = ssl.create_default_context(cafile='/etc/ssl/cert.pem')
+
 url, dest = sys.argv[1], sys.argv[2]
 def progress(count, block, total):
     pct = min(int(count * block * 100 / total), 100) if total > 0 else 0
     print(f"  ... {pct}%", end="\r", flush=True)
+
+opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+urllib.request.install_opener(opener)
 urllib.request.urlretrieve(url, dest, reporthook=progress)
 print()
 PYEOF
@@ -237,12 +250,6 @@ else
   ok "All runtime images built"
 fi
 
-# Short-circuit for local mode
-if [[ "$MODE" == "local" ]]; then
-  _print_local_success
-  exit 0
-fi
-
 _print_local_success() {
   echo
   echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
@@ -259,6 +266,7 @@ _print_local_success() {
   echo
 }
 
+# Short-circuit for local mode
 if [[ "$MODE" == "local" ]]; then
   _print_local_success
   exit 0
