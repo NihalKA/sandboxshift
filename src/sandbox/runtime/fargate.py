@@ -601,6 +601,11 @@ class FargateRuntime(Runtime):
           3. config.setup_command   — optional user pre-task command (if set, e.g. "npm ci")
           4. task                   — the user's command
 
+        config.cpu_limit and config.memory_limit_mb are passed as task-level
+        overrides to ECS run_task (Decision #62), allowing each run to use a
+        different CPU/RAM size without modifying the Terraform task definition.
+        Fargate requires valid CPU/memory combinations — see AWS Fargate docs.
+
         Server mode: appends server_security_group_id to the SG list so the
         task's public IP is reachable on any configured port (ALL TCP inbound).
 
@@ -634,6 +639,13 @@ class FargateRuntime(Runtime):
                 {"name": "PORT", "value": str(state.config.ports[0][1])}
             )
 
+        # Convert cpu_limit (float vCPUs) → ECS CPU units (1024 per vCPU) as a string.
+        # Convert memory_limit_mb → string. Both are passed as task-level overrides
+        # so each run can request a different CPU/RAM size without modifying the
+        # Terraform task definition. (Decision #62)
+        cpu_units = str(int(state.config.cpu_limit * 1024))
+        memory_mib = str(state.config.memory_limit_mb)
+
         ecs = self._session.client("ecs", region_name=self._region)
         response = ecs.run_task(
             cluster=state.cluster_arn,
@@ -647,6 +659,8 @@ class FargateRuntime(Runtime):
                 }
             },
             overrides={
+                "cpu": cpu_units,
+                "memory": memory_mib,
                 "containerOverrides": [
                     {
                         "name": "sandbox",

@@ -1,9 +1,9 @@
 """Tests for FargateRuntime.
 
-30 tests grouped into:
+32 tests grouped into:
   Group 1 — Constructor validation (3 tests)
   Group 2 — provision() (8 tests)
-  Group 3 — execute() (11 tests)
+  Group 3 — execute() (12 tests)
   Group 4 — destroy() (8 tests)
 """
 
@@ -309,6 +309,20 @@ async def test_execute_includes_setup_command_in_task(
     assert "node index.js" in cmd_str
     # setup_command must run before the main task
     assert cmd_str.index("npm ci") < cmd_str.index("node index.js")
+
+
+async def test_execute_passes_cpu_memory_override(
+    runtime, tmp_workspace, aws_clients, mock_sleep
+):
+    _, mock_s3, mock_ecs, mock_logs = aws_clients
+    _setup_ecs_mocks(mock_ecs)
+    mock_logs.get_log_events.return_value = {"events": []}
+    config = SandboxConfig(cpu_limit=2.0, memory_limit_mb=4096)
+    instance_id = await runtime.provision(tmp_workspace, config)
+    await runtime.execute(instance_id, "echo hi", config)
+    overrides = mock_ecs.run_task.call_args.kwargs["overrides"]
+    assert overrides["cpu"] == "2048"    # 2.0 vCPUs x 1024
+    assert overrides["memory"] == "4096"
 
 
 async def test_execute_passes_environment_vars(
