@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -628,3 +629,71 @@ def test_list_corrupt_servers_file_exits_1(tmp_path: Path, monkeypatch, capsys):
             main()
     assert exc_info.value.code == 1
     assert "Error" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Group 10 — --mode flag and YAML sandbox.mode
+# ---------------------------------------------------------------------------
+
+def test_mode_flag_accepted_values(workspace: Path) -> None:
+    """--mode accepts local, cloud, and auto without error."""
+    parser = _build_parser()
+    for mode in ("local", "cloud", "auto"):
+        args = parser.parse_args(["run", str(workspace), "pytest", "--mode", mode])
+        assert args.mode == mode
+
+
+def test_mode_local_sets_burst_engine_threshold_zero(
+    workspace: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--mode local → BurstEngine receives ram_threshold_gb=0.0 (always local)."""
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(workspace), "pytest", "--mode", "local",
+    ])
+    with patch("sandboxshift.cli.main.BurstEngine") as mock_burst:
+        mock_burst.return_value = MagicMock()
+        with pytest.raises(SystemExit):
+            main()
+    _, kwargs = mock_burst.call_args
+    assert kwargs["ram_threshold_gb"] == 0.0
+
+
+def test_mode_cloud_sets_burst_engine_threshold_inf(
+    workspace: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--mode cloud → BurstEngine receives ram_threshold_gb=inf (always cloud)."""
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(workspace), "pytest", "--mode", "cloud",
+    ])
+    with patch("sandboxshift.cli.main.BurstEngine") as mock_burst:
+        mock_burst.return_value = MagicMock()
+        with pytest.raises(SystemExit):
+            main()
+    _, kwargs = mock_burst.call_args
+    assert math.isinf(kwargs["ram_threshold_gb"])
+
+
+def test_yaml_sandbox_mode_local_respected(
+    workspace: Path,
+    mock_manager: tuple[type, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """YAML sandbox.mode: local is respected when CLI --mode is auto (default)."""
+    monkeypatch.setattr(
+        _cli_main_module,
+        "load_workspace_config",
+        lambda _: {"sandbox_mode": "local"},
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "sandboxshift", "run", str(workspace), "pytest",
+    ])
+    with patch("sandboxshift.cli.main.BurstEngine") as mock_burst:
+        mock_burst.return_value = MagicMock()
+        with pytest.raises(SystemExit):
+            main()
+    _, kwargs = mock_burst.call_args
+    assert kwargs["ram_threshold_gb"] == 0.0

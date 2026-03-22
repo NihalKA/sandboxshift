@@ -26,6 +26,7 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
           timeout: 1800             # seconds
           setup: "uv sync"          # shell command
           skip_sensitivity_check: true  # skip scan for trusted workspaces
+          mode: auto                # local | cloud | auto (default: auto)
 
         workspace:
           readonly: true            # mount workspace read-only inside container
@@ -77,6 +78,11 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         result["setup_command"] = str(sandbox["setup"])
     if sandbox.get("skip_sensitivity_check"):
         result["skip_sensitivity_check"] = True
+    if "mode" in sandbox:
+        mode_val = str(sandbox["mode"]).lower()
+        if mode_val in ("local", "cloud", "auto"):
+            result["sandbox_mode"] = mode_val
+        # Unknown values are silently ignored — never raise from config loading.
 
     # \u2500\u2500 workspace section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     workspace = data.get("workspace") or {}

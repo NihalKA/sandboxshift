@@ -293,8 +293,21 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
 
     fargate_runtime = _build_fargate_runtime(audit_logger)
     podman_runtime = PodmanRuntime(audit_logger=audit_logger)
-    # --ram-threshold is in MB; BurstEngine expects GB — divide by 1024.
-    burst_engine = BurstEngine(ram_threshold_gb=args.ram_threshold / 1024)
+
+    # Resolve effective run mode.
+    # Priority: CLI --mode (if not "auto") > YAML sandbox.mode > --ram-threshold.
+    # --mode local  → threshold=0.0      (available RAM always ≥ 0 → always local)
+    # --mode cloud  → threshold=+inf     (available RAM never ≥ inf → always cloud)
+    # --mode auto   → check YAML sandbox.mode, then fall back to --ram-threshold
+    effective_mode = args.mode if args.mode != "auto" else yaml_cfg.get("sandbox_mode", "auto")
+    if effective_mode == "local":
+        effective_threshold_gb = 0.0
+    elif effective_mode == "cloud":
+        effective_threshold_gb = float("inf")
+    else:  # auto
+        effective_threshold_gb = args.ram_threshold / 1024
+
+    burst_engine = BurstEngine(ram_threshold_gb=effective_threshold_gb)
 
     manager = SandboxManager(
         local_runtime=podman_runtime,
@@ -358,7 +371,7 @@ def _cmd_list(args: argparse.Namespace) -> None:  # noqa: ARG001
     Reads ~/.sandboxshift/servers.json and prints a table of running cloud
     server tasks. Each row shows: instance ID, public URL(s), and region.
 
-    server.json is written by FargateRuntime._save_server_info() every time
+    servers.json is written by FargateRuntime._save_server_info() every time
     a server task starts, and cleaned up by 'sandboxshift stop'. If the user
     closed their terminal without stopping, entries remain here and can be
     stopped with 'sandboxshift stop <instance_id>'.
@@ -502,10 +515,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # ── sandboxshift run ──────────────────────────────────────────────────
+    # ── sandboxshift run ─────────────────────────────────────────────────
     run_parser = subparsers.add_parser("run", help="Run a task in a sandbox")
     run_parser.add_argument("workspace", help="Path to workspace directory")
     run_parser.add_argument("task", help="Shell command to run")
+    run_parser.add_argument(
+        "--mode",
+        choices=["local", "cloud", "auto"],
+        default="auto",
+        help=(
+            "Run mode: 'local' (always run in Podman), 'cloud' (always burst to Fargate), "
+            "'auto' (default — decide based on available RAM and --ram-threshold). "
+            "Overrides YAML sandbox.mode. Never overrides sensitive-data detection."
+        ),
+    )
     run_parser.add_argument(
         "--memory-mb",
         dest="memory_mb",
@@ -550,7 +573,10 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="ram_threshold",
         type=int,
         default=1024,
-        help="Available RAM threshold in MB below which cloud bursting is triggered (default: 1024)",
+        help=(
+            "Available RAM threshold in MB. If available RAM < N, burst to cloud "
+            "(default: 1024). Only used when --mode is 'auto'."
+        ),
     )
     run_parser.add_argument(
         "--skip-sensitivity-check",
