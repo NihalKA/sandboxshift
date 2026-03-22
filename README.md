@@ -176,11 +176,14 @@ workspace:
   readonly: false            # true = workspace mounted read-only inside container
 
 network:
+  # LOCAL ONLY — enforced via --dns=none + --add-host in Podman.
+  # In cloud (Fargate), outbound access is controlled by the AWS Security Group
+  # provisioned by Terraform at setup time. This list is audited but not enforced.
   allow:
-    - pypi.org               # FQDNs the container can reach outbound
+    - pypi.org               # FQDNs the local container can reach outbound
     - npmjs.com
     - api.github.com
-  # Use ["*"] to allow ALL outbound traffic — disables Security Layer 4
+  # Use ["*"] to allow ALL outbound traffic (local) — disables Security Layer 4
   # allow:
   #   - "*"
 
@@ -199,7 +202,8 @@ ports:
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
 - `resources.min_cpu` / `resources.min_memory` are **hard requirements** — if not met locally, cloud is forced regardless of `--ram-threshold`
 - `resources.cpu` / `resources.memory` are **container limits** (cgroup caps), not burst triggers
-- `network.allow` with `["*"]` disables the outbound allowlist entirely — use only for trusted workspaces
+- `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
+- `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
@@ -237,8 +241,8 @@ sandboxshift run <workspace> <task> [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port PORT` | — | Expose a port. Accepts bare `3000` (maps 3000→3000) or `HOST:CONTAINER` e.g. `8080:3000`. Repeat for multiple ports. Combined with YAML `ports:`. |
-| `--allow FQDN` | — | Allow outbound to this domain. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. |
-| `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. |
+| `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
+| `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
 | `--memory-mb N` | `512` | Container RAM cap in MB (128–65536). Overrides YAML `resources.memory`. |
 | `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Overrides YAML `resources.cpu`. |
@@ -280,7 +284,7 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 | Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
 | Setup command | `sandbox.setup` | `--setup` | CLI wins |
 | Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
-| Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely |
+| Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely. **Local enforcement only.** |
 | CPU limit | `resources.cpu` | `--cpu` | CLI wins |
 | Memory limit | `resources.memory` | `--memory-mb` | CLI wins |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
