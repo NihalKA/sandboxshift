@@ -25,9 +25,11 @@ workspace:
 # by your VPC routing and security groups, not by SandboxShift.
 
 resources:
-  # NOTE: cpu and memory only affect local Podman (cgroups).
-  # For Fargate, CPU/memory is fixed in the Terraform task definition.
-  # See README for valid Fargate CPU/memory combinations.
+  # cpu and memory apply to BOTH local and cloud.
+  # Local:  enforced as Podman cgroup limits.
+  # Cloud:  FargateRuntime registers a fresh ECS task definition per run
+  #         with the exact CPU/memory requested (Decision #64).
+  #         Must be a valid Fargate combination — see README for valid combos.
   cpu: 1.0
   memory: 2GB
 
