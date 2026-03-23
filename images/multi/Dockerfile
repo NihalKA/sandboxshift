@@ -28,6 +28,11 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
+# Enable corepack so yarn and pnpm are available without a separate install.
+# corepack ships with Node 20 — this is a zero-dependency unlock.
+# Must run as root (before USER switch) since it writes to /usr/local/bin.
+RUN corepack enable
+
 # Install boto3 for S3 workspace download bootstrap (used in Fargate mode).
 # Install uv for fast Python dependency management.
 RUN pip install --no-cache-dir boto3 uv

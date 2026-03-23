@@ -28,6 +28,11 @@ RUN apt-get update \
  && pip3 install --no-cache-dir --break-system-packages boto3 \
  && rm -rf /var/lib/apt/lists/*
 
+# Enable corepack so yarn and pnpm are available without a separate install.
+# corepack ships with Node 20 — this is a zero-dependency unlock.
+# Must run as root (before USER switch) since it writes to /usr/local/bin.
+RUN corepack enable
+
 # Create a non-root user for runtime execution.
 # Home is /home/sandboxshift (NOT /workspace) so that npm/pip user-installs
 # and other tools that write to ~ still work when workspace is mounted :ro.
