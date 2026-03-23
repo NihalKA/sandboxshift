@@ -68,6 +68,11 @@ _MEMORY_MB_MAX = 65536
 _CPU_MIN = 0.25
 _CPU_MAX = 64.0
 
+# Hardcoded last-resort defaults used when neither CLI flag nor YAML provides a value.
+_DEFAULT_CPU = 1.0
+_DEFAULT_MEMORY_MB = 512
+_DEFAULT_TIMEOUT = 1800
+
 
 # ---------------------------------------------------------------------------
 # Auto-load ~/.sandboxshift/fargate.env
@@ -281,6 +286,11 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
             seen.add(pt)
             all_ports.append(pt)
 
+    # For each resource field the merge priority is:
+    #   CLI flag (explicit) → sandboxshift.yaml → hardcoded default
+    # --cpu / --memory-mb / --timeout default to None in argparse so we can
+    # distinguish "user did not pass this flag" from "user passed the value".
+
     # setup_command: CLI --setup wins over YAML.
     effective_setup = args.setup if args.setup is not None else yaml_cfg.get("setup_command")
     # network_allow: CLI --allow wins over YAML.
@@ -292,12 +302,27 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
     # min resource requirements: YAML only (no CLI flags in V1).
     min_cpu_required = yaml_cfg.get("min_cpu_required", 0.0)
     min_memory_mb_required = yaml_cfg.get("min_memory_mb_required", 0)
+    # cpu_limit: CLI --cpu wins over YAML resources.cpu.
+    effective_cpu = (
+        args.cpu if args.cpu is not None
+        else yaml_cfg.get("cpu_limit", _DEFAULT_CPU)
+    )
+    # memory_limit_mb: CLI --memory-mb wins over YAML resources.memory.
+    effective_memory_mb = (
+        args.memory_mb if args.memory_mb is not None
+        else yaml_cfg.get("memory_limit_mb", _DEFAULT_MEMORY_MB)
+    )
+    # timeout_seconds: CLI --timeout wins over YAML sandbox.timeout.
+    effective_timeout = (
+        args.timeout if args.timeout is not None
+        else yaml_cfg.get("timeout_seconds", _DEFAULT_TIMEOUT)
+    )
 
     config = SandboxConfig(
-        cpu_limit=args.cpu,
-        memory_limit_mb=args.memory_mb,
+        cpu_limit=effective_cpu,
+        memory_limit_mb=effective_memory_mb,
         network_allow=effective_allow,
-        timeout_seconds=args.timeout,
+        timeout_seconds=effective_timeout,
         setup_command=effective_setup,
         ports=all_ports,
         skip_sensitivity_check=skip_scan,
@@ -346,14 +371,16 @@ def _cmd_run(args: argparse.Namespace) -> None:
     if args.allow:
         _validate_allow_hosts(list(args.allow))
 
-    # Bounds check memory and cpu (CLI users bypass models.py constraints).
-    if not (_MEMORY_MB_MIN <= args.memory_mb <= _MEMORY_MB_MAX):
+    # Bounds check memory and cpu only when the flag was explicitly passed.
+    # When the value is None the YAML fallback (applied in _run_async) takes
+    # effect — bounds on YAML-sourced values are enforced by the Fargate API.
+    if args.memory_mb is not None and not (_MEMORY_MB_MIN <= args.memory_mb <= _MEMORY_MB_MAX):
         print(
             f"Error: --memory-mb must be between {_MEMORY_MB_MIN} and {_MEMORY_MB_MAX}",
             file=sys.stderr,
         )
         sys.exit(1)
-    if not (_CPU_MIN <= args.cpu <= _CPU_MAX):
+    if args.cpu is not None and not (_CPU_MIN <= args.cpu <= _CPU_MAX):
         print(
             f"Error: --cpu must be between {_CPU_MIN} and {_CPU_MAX}",
             file=sys.stderr,
@@ -551,20 +578,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--memory-mb",
         dest="memory_mb",
         type=int,
-        default=512,
-        help="Memory limit in MB (default: 512). For cloud: baked into the ECS task definition registered per run.",
+        default=None,
+        help=(
+            "Memory limit in MB (default: from sandboxshift.yaml resources.memory, "
+            f"or {_DEFAULT_MEMORY_MB} MB if not set). "
+            "For cloud: baked into the ECS task definition registered per run."
+        ),
     )
     run_parser.add_argument(
         "--cpu",
         type=float,
-        default=1.0,
-        help="CPU limit in vCPUs (default: 1.0). For cloud: baked into the ECS task definition registered per run.",
+        default=None,
+        help=(
+            "CPU limit in vCPUs (default: from sandboxshift.yaml resources.cpu, "
+            f"or {_DEFAULT_CPU} vCPU if not set). "
+            "For cloud: baked into the ECS task definition registered per run."
+        ),
     )
     run_parser.add_argument(
         "--timeout",
         type=int,
-        default=1800,
-        help="Task timeout in seconds (default: 1800)",
+        default=None,
+        help=(
+            "Task timeout in seconds (default: from sandboxshift.yaml sandbox.timeout, "
+            f"or {_DEFAULT_TIMEOUT}s if not set)."
+        ),
     )
     run_parser.add_argument(
         "--allow",
