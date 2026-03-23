@@ -712,6 +712,7 @@ class FargateRuntime(Runtime):
         The injected command runs up to four stages in sequence:
           1. _S3_DOWNLOAD_BOOTSTRAP — download workspace from S3 into /workspace
           2. _S3_DEPS_BOOTSTRAP     — cd /workspace, pip/npm install if manifests present
+                                      (skipped when setup_command is provided)
           3. config.setup_command   — optional user pre-task command (if set, e.g. "npm ci")
           4. task                   — the user's command
 
@@ -732,7 +733,12 @@ class FargateRuntime(Runtime):
             if state.config.setup_command
             else task
         )
-        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP} && {_S3_DEPS_BOOTSTRAP} && {user_task}"
+        # Skip auto-dep bootstrap when setup_command is provided — the user's
+        # setup command handles dependency installation explicitly, so running
+        # _S3_DEPS_BOOTSTRAP too would double-install (npm install + npm ci, etc.).
+        # Without a setup_command, _S3_DEPS_BOOTSTRAP auto-installs any detected deps.
+        _deps = f" && {_S3_DEPS_BOOTSTRAP}" if not state.config.setup_command else ""
+        full_command = f"{_S3_DOWNLOAD_BOOTSTRAP}{_deps} && {user_task}"
 
         # Server mode: attach the server SG (ALL TCP inbound) alongside the
         # standard batch SG. Batch mode: batch SG only.
