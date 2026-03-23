@@ -298,6 +298,12 @@ class PodmanRuntime(Runtime):
         terminal.  The returned ``TaskResult.stdout`` is
         ``"<streamed to terminal>"`` in that case (Decision #51).
 
+        ``-t`` (pseudo-TTY) is passed to podman when ports are configured so
+        Node.js and other runtimes use line-buffered stdout instead of full-
+        buffered. Without -t, server startup logs (e.g. NestJS bootstrap) are
+        held in a ~4KB buffer and never appear until the buffer fills or the
+        process exits.
+
         ``--entrypoint /bin/sh`` is always passed (Decision #53) so the task
         runs via /bin/sh regardless of the ENTRYPOINT baked into the image.
 
@@ -347,6 +353,12 @@ class PodmanRuntime(Runtime):
 
         # Build port publish flags — always bound to 127.0.0.1 (Decision #50).
         port_flags: list[str] = []
+        if state.config.ports:
+            # Allocate a pseudo-TTY so Node/Python processes use line-buffered
+            # output instead of full-buffered. Without -t, subprocess.PIPE gives
+            # the container a non-TTY fd and runtimes like Node buffer stdout
+            # until ~4KB fills — server startup logs never appear in the terminal.
+            port_flags.append("-t")
         for h, c in state.config.ports:
             port_flags.extend(["-p", f"127.0.0.1:{h}:{c}"])
         # Inject PORT env var so apps can read process.env.PORT / $PORT without
