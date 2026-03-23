@@ -39,7 +39,7 @@ SandboxShift runs every AI agent task in a hardened sandbox. If your machine has
 **Prerequisites — you install these:**
 
 | Requirement | For | Install |
-|-------------|-----|-------|
+|-------------|--------|-------|
 | Python 3.11+ | always | [python.org](https://python.org) |
 | Podman (rootless) | always | [podman.io](https://podman.io/getting-started/installation) |
 | AWS CLI v2 | cloud burst only | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
@@ -131,6 +131,9 @@ sandboxshift run /path/to/project "python main.py" --mode cloud
 sandboxshift run /path/to/node-app "node index.js" --port 3000 --mode cloud
 # Ctrl+C to stop tailing (server keeps running)
 sandboxshift stop <instance_id>
+
+# Upload a .env file to S3 for a cloud run
+sandboxshift run /path/to/project "node dist/main.js" --mode cloud --allow-file .env
 ```
 
 See [Getting Started](docs/getting-started.md) for a full walkthrough.
@@ -174,7 +177,7 @@ Defence in depth — every layer adds independent protection:
 | 3. gVisor syscall interception | Intercepts every system call (V2) |
 | 4. Network policy | Default deny-all, explicit FQDN whitelist only |
 | 5. Resource limits | Hard CPU and RAM caps via cgroups |
-| 6. Sensitive data detection | Secrets never leave your machine |
+| 6. Sensitive data detection | Secrets never leave your machine by default |
 | 7. Audit trail | Full append-only log of every agent action |
 
 ---
@@ -184,7 +187,7 @@ Defence in depth — every layer adds independent protection:
 SandboxShift auto-detects your language from workspace markers:
 
 | Found in workspace | Runtime used |
-|-------------------|-------------|
+|-------------------|--------------|
 | `requirements.txt` | `sandboxshift/runtime-python:3.11` |
 | `package.json` | `sandboxshift/runtime-node:20` |
 | Multiple found | `sandboxshift/runtime-multi` |
@@ -219,6 +222,10 @@ sandbox:
 
 workspace:
   readonly: false            # true = workspace mounted read-only inside container
+  upload_allow:              # filenames to upload to S3 even though they match sensitive patterns
+    - .env                   # exact filename match only — not a glob
+    - .env.staging           # each overridden file is recorded in the audit log
+                             # CLI --allow-file overrides this list entirely when set
 
 network:
   # LOCAL ONLY — enforced via --dns=none + --add-host in Podman.
@@ -258,6 +265,7 @@ ports:
 - `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
 - `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
 - `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
+- `workspace.upload_allow` names specific files that are allowed to upload to S3 for cloud runs despite matching sensitive patterns (`.env`, `.pem`, `.key`). Every override is recorded in the audit log.
 
 ### Fargate valid CPU / memory combinations
 
@@ -319,7 +327,29 @@ sandboxshift run <workspace> <task> [options]
 | `--cpu N` | `1.0` | Container CPU cores (0.25–64.0). Locally: Podman cgroup cap. Cloud: baked into a fresh ECS task definition registered per run (Decision #64). Overrides YAML `resources.cpu`. Must be a valid Fargate combination with `--memory-mb` when running in cloud. |
 | `--ram-threshold N` | `1024` | **Auto-mode burst trigger (MB).** If available host RAM < N MB, burst to cloud. Only used when `--mode auto` (and YAML `sandbox.mode: auto`). Use `--mode cloud` / `--mode local` for a cleaner toggle. |
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
+| `--allow-file FILENAME` | — | **Cloud only.** Allow a sensitive filename (`.env`, `.pem`, `.key`) to be uploaded to S3. Exact filename match — not a glob. Repeat for multiple: `--allow-file .env --allow-file .env.staging`. CLI overrides YAML `workspace.upload_allow` entirely when set. Every override is recorded in the audit log. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
+
+### Uploading sensitive files to S3
+
+By default, SandboxShift **blocks** filenames matching `.env`, `.pem`, and `.key` from being uploaded to S3 during cloud runs (Security Layer 6). This protects credentials from leaving your machine unintentionally.
+
+When you own and trust the file (e.g. a non-secret runtime `.env`), you can explicitly allowlist it:
+
+```bash
+# CLI — upload .env and .env.staging for this run
+sandboxshift run . "node dist/main.js" --mode cloud \
+  --allow-file .env \
+  --allow-file .env.staging
+
+# YAML — persistent allowlist checked into the workspace
+# workspace:
+#   upload_allow:
+#     - .env
+#     - .env.staging
+```
+
+Each allowlisted filename that actually matched the sensitive filter is recorded in the audit log under `upload_allowed_sensitive`.
 
 ### Controlling local vs cloud
 
@@ -369,6 +399,7 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 | Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task definition registered per run, Decision #64). |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
 | Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
+| Upload allow-list | `workspace.upload_allow` | `--allow-file` | CLI replaces YAML entirely when set. **Cloud only** — controls which sensitive filenames are allowed to upload to S3. Each override is audited. |
 | Min CPU (burst trigger) | `resources.min_cpu` | no CLI flag | YAML only |
 | Min memory (burst trigger) | `resources.min_memory` | no CLI flag | YAML only |
 | RAM threshold (fine-grained, auto-mode only) | no YAML key | `--ram-threshold` | CLI only. Only used when both `--mode` and `sandbox.mode` are `auto`. |

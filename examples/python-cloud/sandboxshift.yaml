@@ -1,31 +1,25 @@
 # sandboxshift.yaml — python-cloud example
 #
-# This workspace always runs on AWS Fargate — never locally.
-# Cloud burst must be set up first: ./sandboxshift-setup.sh cloud
+# Bursts to AWS Fargate. Requires 'sandboxshift-setup.sh cloud' to have
+# been run at least once so ~/.sandboxshift/fargate.env exists.
 #
-# Equivalent CLI (overrides this file):
-#   sandboxshift run examples/python-cloud "python app.py" \\
-#     --mode cloud \\
-#     --cpu 4.0 \\
-#     --memory-mb 8192 \\
-#     --setup "pip install -r requirements.txt"
+# This example uploads a .env file alongside the workspace.
+# SandboxShift blocks .env uploads by default — workspace.upload_allow
+# explicitly opts this file in. The override is recorded in the audit log.
 
 sandbox:
-  mode: cloud          # always burst to Fargate, ignore local RAM
+  mode: cloud
   timeout: 600
   setup: "pip install -r requirements.txt"
 
 workspace:
   readonly: false
-
-# network.allow has no effect on Fargate — outbound access is controlled
-# by your VPC routing and security groups, not by SandboxShift.
+  # Allow .env to be uploaded to S3 so the task can read runtime config.
+  # Remove or comment this out if your .env contains real secrets —
+  # SandboxShift will then refuse to upload it and force a local run instead.
+  upload_allow:
+    - .env
 
 resources:
-  # cpu and memory apply to BOTH local and cloud.
-  # Local:  enforced as Podman cgroup limits.
-  # Cloud:  FargateRuntime registers a fresh ECS task definition per run
-  #         with the exact CPU/memory requested (Decision #64).
-  #         Must be a valid Fargate combination — see README for valid combos.
   cpu: 4.0
   memory: 8GB
