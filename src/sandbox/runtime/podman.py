@@ -28,11 +28,16 @@ the container uses slirp4netns without --dns=none and without any
 disables Security Layer 4 and is recorded as a network_unrestricted_mode
 audit event with an explicit warning.
 
-HOME=/tmp is always injected (Decision #56). The sandboxshift user's home
-directory in the image may be /workspace (old images) or /home/sandboxshift
-(new images). In both cases, HOME=/tmp ensures pip user-installs and other
-tools that write to ~ always land in a writable location — even when the
-workspace is mounted :ro. /tmp is always writable inside the container.
+HOME=/home/sandboxshift is always injected. The runtime images create
+/home/sandboxshift with correct ownership (UID 10000) and bake
+ENV HOME=/home/sandboxshift + ENV PATH=/home/sandboxshift/.local/bin:$PATH
+into the image. We re-inject HOME explicitly at runtime to be safe (podman
+--user only sets UID/GID, not HOME). This ensures that pip user-installs
+(e.g. 'pip install -r requirements.txt') place scripts in
+/home/sandboxshift/.local/bin, which is on PATH, making 'uvicorn', 'pytest',
+etc. directly executable inside the sandbox after a setup install.
+/home/sandboxshift is always writable even when the workspace is mounted :ro
+because it is a completely separate directory from /workspace.
 
 PORT env var is injected when ports are configured (Decision #57). This
 lets apps read process.env.PORT (Node) or $PORT (shell/Python) without
@@ -73,9 +78,10 @@ _MARKER_IMAGES: dict[str, str] = {
 }
 
 # Pip package cache — persisted on the host across container runs.
-# Mounted at /tmp/.cache/pip inside the container, matching HOME=/tmp
-# so pip finds the cache regardless of which image variant is in use.
-_PIP_CACHE_CONTAINER_PATH: str = "/tmp/.cache/pip"
+# Mounted at /home/sandboxshift/.cache/pip inside the container, matching
+# the HOME=/home/sandboxshift env var injected at runtime, so pip's default
+# cache path ($HOME/.cache/pip) resolves to the mounted volume.
+_PIP_CACHE_CONTAINER_PATH: str = "/home/sandboxshift/.cache/pip"
 
 
 def _pip_cache_host_path() -> Path:
@@ -295,9 +301,10 @@ class PodmanRuntime(Runtime):
         ``--entrypoint /bin/sh`` is always passed (Decision #53) so the task
         runs via /bin/sh regardless of the ENTRYPOINT baked into the image.
 
-        ``HOME=/tmp`` is always injected (Decision #56) so pip user-installs
-        and other tools that write to ~ land in /tmp regardless of the home
-        directory baked into the image. This makes workspace :ro mounts safe.
+        ``HOME=/home/sandboxshift`` is always injected so pip user-installs
+        land in /home/sandboxshift/.local/bin, which is on PATH. This ensures
+        tools installed via 'pip install -r requirements.txt' (e.g. uvicorn,
+        pytest) are executable without needing 'python -m <cmd>'.
 
         ``PORT=<container_port>`` is injected when ports are configured
         (Decision #57). Apps can read process.env.PORT (Node) or $PORT
@@ -351,8 +358,11 @@ class PodmanRuntime(Runtime):
         # (Decision #53). Ensures the task always runs via /bin/sh -c regardless
         # of what the image's ENTRYPOINT is set to.
         #
-        # HOME=/tmp (Decision #56): pip user-installs and other tools that write
-        # to ~ will use /tmp which is always writable, even when workspace is :ro.
+        # HOME=/home/sandboxshift: re-injected explicitly at runtime because
+        # --user 10000:10000 sets UID/GID but does not set HOME. Without this,
+        # podman may leave HOME unset or set it to /tmp, causing pip to install
+        # scripts to /tmp/.local/bin (not on PATH) instead of
+        # /home/sandboxshift/.local/bin (on PATH via ENV PATH in the image).
         cmd: list[str] = [
             "podman",
             "run",
@@ -362,7 +372,7 @@ class PodmanRuntime(Runtime):
             "--user",
             _NONROOT_USER,
             "--env",
-            "HOME=/tmp",
+            "HOME=/home/sandboxshift",
             "--cpus",
             str(state.config.cpu_limit),
             "--memory",
