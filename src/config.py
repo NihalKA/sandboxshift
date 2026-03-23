@@ -34,6 +34,10 @@ class SandboxConfig:
         min_memory_mb_required:   Minimum available RAM in MB the task needs.
                                   If local available RAM is less, BurstEngine will
                                   force cloud execution. 0 = no requirement (default).
+        upload_allow_files:       List of filenames explicitly allowed to upload to S3
+                                  even if they match sensitive patterns (e.g. ['.env',
+                                  '.env.dev']). Exact filename match only — not a glob.
+                                  Each overridden file is recorded in the audit log.
     """
 
     cpu_limit: float = 2.0
@@ -46,3 +50,4 @@ class SandboxConfig:
     skip_sensitivity_check: bool = False
     min_cpu_required: float = 0.0
     min_memory_mb_required: int = 0
+    upload_allow_files: list[str] = field(default_factory=list)

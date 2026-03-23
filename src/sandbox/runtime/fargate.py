@@ -308,7 +308,8 @@ class FargateRuntime(Runtime):
         Uploads workspace files to the persistent S3 bucket under a unique
         per-run prefix (workspace/{instance_id}/), then registers a fresh
         ECS task definition for this run (Decision #64). Skips:
-          - sensitive filenames (.env, .pem, .key)
+          - sensitive filenames (.env, .pem, .key) unless listed in
+            config.upload_allow_files (exact filename match)
           - .git directory
           - local-only dependency directories (node_modules, __pycache__, .venv,
             etc. — defined in _SKIP_DIRS; reinstalled fresh in ECS by
@@ -336,19 +337,26 @@ class FargateRuntime(Runtime):
         # S3 prefix for this run — trailing slash is intentional
         s3_prefix = f"workspace/{instance_id}/"
 
-        # Collect files to upload — skip sensitive names, .git, and local-only
-        # dependency directories (node_modules etc. are reinstalled inside the
-        # ECS task by _S3_DEPS_BOOTSTRAP). (Decision #58)
+        # Collect files to upload — skip sensitive names (unless explicitly
+        # allowlisted in config.upload_allow_files), .git, and local-only
+        # dependency directories. (Decision #58)
         files = [
             f
             for f in workspace.rglob("*")
             if f.is_file()
-            and not _sensitive_filename(f.name)
+            and (f.name in config.upload_allow_files or not _sensitive_filename(f.name))
             and ".git" not in f.relative_to(workspace).parts
             and not any(
                 part in _SKIP_DIRS
                 for part in f.relative_to(workspace).parts
             )
+        ]
+
+        # Collect filenames that were explicitly allowed past the sensitive filter
+        # so we can audit them below.
+        upload_allowed_sensitive = [
+            f.name for f in files
+            if f.name in config.upload_allow_files and _sensitive_filename(f.name)
         ]
 
         # 500 MB cap is checked against the filtered set (what we actually upload).
@@ -419,6 +427,7 @@ class FargateRuntime(Runtime):
             "is_server": is_server,
             "files_uploaded": total,
             "bytes_uploaded": total_bytes,
+            "upload_allowed_sensitive": upload_allowed_sensitive,
         })
 
         return instance_id

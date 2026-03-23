@@ -30,6 +30,9 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
 
         workspace:
           readonly: true            # mount workspace read-only inside container
+          upload_allow:             # filenames allowed to upload despite sensitive patterns
+            - .env
+            - .env.dev
 
         network:
           allow:
@@ -88,6 +91,8 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
     workspace = data.get("workspace") or {}
     if "readonly" in workspace:
         result["workspace_readonly"] = bool(workspace["readonly"])
+    if "upload_allow" in workspace:
+        result["upload_allow_files"] = [str(f) for f in list(workspace["upload_allow"])]
 
     # \u2500\u2500 network section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     network = data.get("network") or {}

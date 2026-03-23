@@ -297,6 +297,11 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
     effective_allow = list(args.allow) if args.allow else yaml_cfg.get("network_allow", [])
     # skip_sensitivity_check: CLI --skip-sensitivity-check wins over YAML.
     skip_scan = args.skip_sensitivity_check or yaml_cfg.get("skip_sensitivity_check", False)
+    # upload_allow_files: CLI --allow-file wins over YAML workspace.upload_allow.
+    effective_allow_files = (
+        list(args.allow_files) if args.allow_files
+        else yaml_cfg.get("upload_allow_files", [])
+    )
     # workspace_readonly: YAML only (no CLI flag in V1).
     workspace_readonly = yaml_cfg.get("workspace_readonly", False)
     # min resource requirements: YAML only (no CLI flags in V1).
@@ -329,6 +334,7 @@ async def _run_async(args: argparse.Namespace, workspace: Path) -> RunResult:
         workspace_readonly=workspace_readonly,
         min_cpu_required=min_cpu_required,
         min_memory_mb_required=min_memory_mb_required,
+        upload_allow_files=effective_allow_files,
     )
 
     audit_log_path = _resolve_audit_log(args)
@@ -640,6 +646,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Skip sensitive data detection (use with caution)",
+    )
+    run_parser.add_argument(
+        "--allow-file",
+        dest="allow_files",
+        action="append",
+        default=[],
+        metavar="FILENAME",
+        help=(
+            "Allow a sensitive filename to be uploaded to S3 "
+            "(e.g. --allow-file .env --allow-file .env.dev). "
+            "Use only for files you own and trust."
+        ),
     )
     run_parser.add_argument(
         "--audit-log",
