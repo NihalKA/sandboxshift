@@ -1,0 +1,29 @@
+# Template for terraform/fargate/backend.tf
+#
+# backend.tf is gitignored — it is generated at runtime by sandboxshift-setup.sh
+# with your AWS account-specific S3 bucket and DynamoDB table values.
+#
+# To use Terraform directly without running sandboxshift-setup.sh first,
+# copy this file and fill in real values:
+#
+#   cp terraform/fargate/backend.tf.example terraform/fargate/backend.tf
+#
+# sandboxshift-setup.sh overwrites backend.tf with:
+#
+#   terraform {
+#     backend "s3" {
+#       bucket         = "sandboxshift-tfstate-<account_id>-<6char_hash>"
+#       key            = "sandboxshift/fargate/terraform.tfstate"
+#       region         = "<your-region>"
+#       encrypt        = true
+#       dynamodb_table = "sandboxshift-tfstate-lock-<6char_hash>"
+#     }
+#   }
+#
+# This local-backend placeholder allows `terraform validate` to work on
+# fresh clones without AWS credentials, before setup.sh has run.
+terraform {
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}

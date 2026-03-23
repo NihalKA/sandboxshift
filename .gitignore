@@ -36,6 +36,11 @@ settings.json
 **/*.tfstate.*.backup
 **/.terraform.lock.hcl
 
+# backend.tf is generated at runtime by sandboxshift-setup.sh.
+# It contains your AWS account-specific bucket and DynamoDB table names.
+# See terraform/fargate/backend.tf.example for the template.
+terraform/fargate/backend.tf
+
 # IDE
 .vscode/settings.json
 .idea/
