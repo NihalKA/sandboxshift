@@ -134,6 +134,11 @@ sandboxshift stop <instance_id>
 
 # Upload a .env file to S3 for a cloud run
 sandboxshift run /path/to/project "node dist/main.js" --mode cloud --allow-file .env
+
+# Inject environment variables (npm tokens, API keys, etc.)
+sandboxshift run /path/to/nestjs-app "yarn start" --mode cloud \
+  --env COMPONENTS_UI_NPM_TOKEN=ghp_xxx \
+  --env NODE_ENV=production
 ```
 
 See [Getting Started](docs/getting-started.md) for a full walkthrough.
@@ -227,6 +232,12 @@ workspace:
     - .env.staging           # each overridden file is recorded in the audit log
                              # CLI --allow-file overrides this list entirely when set
 
+env:                         # environment variables injected into the container
+  COMPONENTS_UI_NPM_TOKEN: "ghp_xxx"  # solves yarn .npmrc ${TOKEN} expansion errors
+  NODE_ENV: production       # works in both local (Podman) and cloud (Fargate)
+                             # values are NEVER written to the audit log
+                             # CLI --env KEY=VAL overrides this entire section when set
+
 network:
   # LOCAL ONLY — enforced via --dns=none + --add-host in Podman.
   # In cloud (Fargate), outbound access is controlled by the AWS Security Group
@@ -241,16 +252,10 @@ network:
 
 resources:
   # -- Container limits: applied to BOTH local and cloud --
-  # Local:  caps Podman container CPU/RAM via cgroups
-  # Cloud:  FargateRuntime registers a fresh ECS task definition per run
-  #         with the exact CPU/memory requested (Decision #64). No re-apply needed.
-  #         Fargate requires valid CPU/memory combinations — see table below.
-  cpu: 2                     # CPU cores (local: Podman cgroup; cloud: baked into task def per run — 2 = 2048 CPU units)
+  cpu: 2                     # CPU cores (local: Podman cgroup; cloud: baked into task def per run)
   memory: 4GB                # RAM cap — also accepts "4096MB" or 4096 (MB int)
 
   # -- Host requirements (burst triggers) --
-  # These describe what your local machine must have available.
-  # If the requirement is NOT met, SandboxShift forces cloud — regardless of --ram-threshold.
   min_cpu: 4                 # host must have ≥ 4 CPUs, otherwise burst to cloud
   min_memory: 8GB            # host must have ≥ 8GB available RAM, otherwise burst to cloud
 
@@ -261,11 +266,11 @@ ports:
 
 **Key facts:**
 - **YAML is merged with CLI flags** — CLI always wins on conflicts (except `ports`, which are combined)
-- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via a fresh ECS task definition registered per run (Decision #64) with the exact CPU/memory requested — any valid Fargate combination works, no Terraform re-apply needed
+- `env:` variables are injected via `--env KEY=VAL` in Podman and `containerOverrides.environment` in Fargate. Values are **never** written to the audit log — only key names are recorded.
+- `resources.cpu` / `resources.memory` are applied to **both local and cloud** — locally via Podman cgroup caps; in cloud via a fresh ECS task definition registered per run (Decision #64)
 - `resources.min_cpu` / `resources.min_memory` are **host requirements** — if your local machine falls short, cloud is forced regardless of `--ram-threshold`
-- `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only** — actual outbound access is controlled by the AWS Security Group provisioned by Terraform (which allows all egress by default in V1)
-- `network.allow` with `["*"]` disables the local outbound allowlist — use only for trusted workspaces
-- `workspace.upload_allow` names specific files that are allowed to upload to S3 for cloud runs despite matching sensitive patterns (`.env`, `.pem`, `.key`). Every override is recorded in the audit log.
+- `network.allow` is **enforced locally** via Podman (`--dns=none` + per-domain `--add-host`). In cloud, it is **recorded in the audit log only**
+- `workspace.upload_allow` names specific files allowed to upload to S3 for cloud runs despite matching sensitive patterns
 
 ### Fargate valid CPU / memory combinations
 
@@ -318,8 +323,9 @@ sandboxshift run <workspace> <task> [options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--mode MODE` | `auto` | Run mode: `local` (always Podman, ignore RAM), `cloud` (always Fargate, ignore RAM), `auto` (decide by available RAM). YAML `sandbox.mode` applies when CLI is `auto`. **Never overrides sensitive-data detection** — if secrets are found, local is always forced. |
+| `--mode MODE` | `auto` | Run mode: `local` (always Podman, ignore RAM), `cloud` (always Fargate, ignore RAM), `auto` (default — decide by available RAM). YAML `sandbox.mode` applies when CLI is `auto`. **Never overrides sensitive-data detection** — if secrets are found, local is always forced. |
 | `--port PORT` | — | Expose a port. Accepts bare `3000` (maps 3000→3000) or `HOST:CONTAINER` e.g. `8080:3000`. Repeat for multiple ports. Combined with YAML `ports:`. |
+| `--env KEY=VAL` | — | Inject an environment variable into the container (e.g. `--env NODE_ENV=production`). Repeat for multiple. CLI replaces YAML `env:` section entirely when set. Values are **never** written to the audit log. Works in both local and cloud. |
 | `--allow FQDN` | — | **Local only.** Allow outbound to this domain in Podman. Repeat for multiple. Use `"*"` for unrestricted. Overrides YAML `network.allow` entirely when set. Has no effect on cloud runs (Fargate uses AWS Security Groups). |
 | `--setup CMD` | — | Shell command run before the task (e.g. `"npm ci"`). Overrides YAML `sandbox.setup`. Works in both local and cloud. |
 | `--timeout N` | `1800` | Kill sandbox after N seconds. Overrides YAML `sandbox.timeout`. |
@@ -329,6 +335,26 @@ sandboxshift run <workspace> <task> [options]
 | `--skip-sensitivity-check` | `false` | Skip secret scanning. Combined with YAML `sandbox.skip_sensitivity_check`. |
 | `--allow-file FILENAME` | — | **Cloud only.** Allow a sensitive filename (`.env`, `.pem`, `.key`) to be uploaded to S3. Exact filename match — not a glob. Repeat for multiple: `--allow-file .env --allow-file .env.staging`. CLI overrides YAML `workspace.upload_allow` entirely when set. Every override is recorded in the audit log. |
 | `--audit-log PATH` | `~/.sandboxshift/audit.log` | Override audit log file path. Also set via `SANDBOXSHIFT_AUDIT_LOG` env var. |
+
+### Injecting environment variables
+
+Yarn, npm, and other tools can reference environment variables in `.npmrc` using `${MY_TOKEN}` syntax. If the variable isn't set inside the container, the tool fails with `Failed to replace env in config`.
+
+Inject the variable with `--env` or via the `env:` YAML key:
+
+```bash
+# CLI — use --env for one-off runs or CI
+sandboxshift run . "yarn start" --mode cloud \
+  --env COMPONENTS_UI_NPM_TOKEN=ghp_xxx \
+  --env NODE_ENV=production
+
+# YAML — persistent values checked into the workspace
+# env:
+#   COMPONENTS_UI_NPM_TOKEN: "ghp_xxx"
+#   NODE_ENV: production
+```
+
+env vars work in **both local (Podman) and cloud (Fargate)**. Values are injected via `--env KEY=VAL` in Podman and `containerOverrides.environment` in Fargate. Values are **never** written to the audit log — only key names are recorded.
 
 ### Uploading sensitive files to S3
 
@@ -363,8 +389,6 @@ Each allowlisted filename that actually matched the sensitive filter is recorded
 | Pin workspace to always burst (YAML) | Set `sandbox.mode: cloud` in `sandboxshift.yaml` |
 | Hard cloud requirement via YAML | Set `resources.min_memory: 8GB` in `sandboxshift.yaml` |
 
-> **Note:** `--ram-threshold` compares against **available** RAM right now (not total installed RAM). On a 16 GB machine with many apps open, available might be 4–6 GB.
->
 > **Security:** `--mode cloud` and `sandbox.mode: cloud` never override sensitive-data detection. If SandboxShift finds secrets in the workspace, it always forces local regardless of the mode flag.
 
 ### Other commands
@@ -394,12 +418,13 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 | Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
 | Setup command | `sandbox.setup` | `--setup` | CLI wins |
 | Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins (either true = skip) |
+| Env vars | `env:` | `--env` | CLI replaces YAML entirely when set. Values never logged. Works in both local and cloud. |
 | Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely. **Local enforcement only.** |
 | CPU limit | `resources.cpu` | `--cpu` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task definition registered per run, Decision #64). |
 | Memory limit | `resources.memory` | `--memory-mb` | CLI wins. Applied to both local (Podman cgroup) and cloud (ECS task definition registered per run, Decision #64). |
 | Ports | `ports` | `--port` | **Combined** (YAML + CLI, deduped) |
 | Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
-| Upload allow-list | `workspace.upload_allow` | `--allow-file` | CLI replaces YAML entirely when set. **Cloud only** — controls which sensitive filenames are allowed to upload to S3. Each override is audited. |
+| Upload allow-list | `workspace.upload_allow` | `--allow-file` | CLI replaces YAML entirely when set. **Cloud only.** |
 | Min CPU (burst trigger) | `resources.min_cpu` | no CLI flag | YAML only |
 | Min memory (burst trigger) | `resources.min_memory` | no CLI flag | YAML only |
 | RAM threshold (fine-grained, auto-mode only) | no YAML key | `--ram-threshold` | CLI only. Only used when both `--mode` and `sandbox.mode` are `auto`. |

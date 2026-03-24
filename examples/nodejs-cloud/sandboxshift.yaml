@@ -11,7 +11,8 @@
 #   sandboxshift run examples/nodejs-cloud "node index.js" \\
 #     --mode cloud \\
 #     --port 3000 \\
-#     --setup "npm ci"
+#     --setup "npm ci" \\
+#     --env COMPONENTS_UI_NPM_TOKEN=ghp_xxx
 
 sandbox:
   mode: cloud
@@ -20,6 +21,16 @@ sandbox:
 
 workspace:
   readonly: false
+
+# Environment variables injected into the container.
+# Use this for npm tokens, API keys, and other runtime config that yarn/npm
+# needs to read from .npmrc (e.g. ${COMPONENTS_UI_NPM_TOKEN}).
+# Values are NEVER written to the audit log — only key names are recorded.
+# CLI --env KEY=VAL overrides this entire section when set.
+#
+# env:
+#   COMPONENTS_UI_NPM_TOKEN: "ghp_xxx"
+#   NODE_ENV: production
 
 # network.allow has no effect on Fargate — outbound access is controlled
 # by your VPC routing and security groups, not by SandboxShift.

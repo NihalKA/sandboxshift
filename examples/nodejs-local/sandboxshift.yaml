@@ -19,6 +19,15 @@ workspace:
   # upload_allow:
   #   - .env
 
+# Environment variables injected into the container.
+# Useful for npm tokens, API keys, and other runtime config.
+# Values are NEVER written to the audit log — only key names are recorded.
+# CLI --env KEY=VAL overrides this entire section when set.
+#
+# env:
+#   NODE_ENV: development
+#   MY_API_KEY: "..."
+
 network:
   allow:
     - registry.npmjs.org
