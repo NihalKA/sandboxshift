@@ -1,10 +1,10 @@
 # sandboxshift.yaml — nodejs-local example
 #
-# Runs the Express server in a local Podman sandbox.
-# Port 3000 is bound to 127.0.0.1 only.
+# Runs the Express server in a local Podman sandbox (mode: local forces this).
+# Port 3000 is bound to 127.0.0.1:3000 on the host.
 
 sandbox:
-  mode: local
+  mode: local           # force local always — remove this line to use auto-burst logic
   timeout: 3600
   setup: "npm ci"
 
@@ -34,8 +34,16 @@ network:
     - registry.yarnpkg.com
 
 resources:
-  cpu: 1.0
-  memory: 512MB
+  # ── Container limits (applied inside the sandbox) ──────────────────────────
+  # These cap what the container can use. They do NOT affect the burst decision.
+  cpu: 1.0              # container CPU cap (Podman cgroup)
+  memory: 512MB         # container RAM cap (Podman cgroup)
+
+  # ── Burst triggers (auto-mode only) ────────────────────────────────────────
+  # If your local machine doesn't meet these, SandboxShift bursts to AWS.
+  # Only active when sandbox.mode is "auto" (or not set).
+  # min_cpu: 4          # burst if local machine has fewer than 4 CPUs
+  # min_memory: 8GB     # burst if local machine has less than 8GB available RAM
 
 ports:
   - 3000:3000
