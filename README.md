@@ -1,26 +1,15 @@
 # SandboxShift
 
-<div align="center">
-
-**Run untrusted or AI-generated code in an isolated sandbox — local first, your AWS when needed.**
-
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg)](https://fastapi.tiangolo.com)
-[![Podman](https://img.shields.io/badge/runtime-Podman-892CA0.svg)](https://podman.io)
-
-</div>
-
----
-
-## 5-second demo
+## ⚡ 5-second demo
 
 ```bash
-sandboxshift run /path/to/project "python main.py"
+sandboxshift run . "npm install"
 ```
 
-- runs inside an **isolated sandbox**, not on your machine
-- uses **your AWS** automatically if local resources are low
+Runs in an isolated sandbox — not on your system.
+If your machine is low on resources, it automatically runs in your AWS.
+
+**Run untrusted code safely — without breaking your system.**
 
 ---
 
@@ -34,7 +23,7 @@ chmod +x sandboxshift-setup.sh
 ```
 
 
-For full setup details, see:
+Full setup:
 
 - [docs/installation.md](docs/installation.md) — prerequisites, Podman setup, AWS credentials, PATH setup, and Terraform/cloud setup
 - [docs/getting-started.md](docs/getting-started.md) — first local run and first cloud run
@@ -54,7 +43,7 @@ sandboxshift run /path/to/project "python main.py" --mode cloud
 sandboxshift run /path/to/node-app "node index.js" --port 3000 --mode cloud
 ```
 
-More examples and CLI flags:
+More examples:
 
 - [docs/usage.md](docs/usage.md) — quick start, CLI flags, env vars, cloud/local control, audit commands
 - [docs/getting-started.md](docs/getting-started.md) — guided first run walkthrough
@@ -84,23 +73,22 @@ Running untrusted or AI-generated code directly on your machine can:
 ## How It Works
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                      Your Machine                        │
-│                                                          │
-│   sandboxshift run /workspace "task"                     │
-│            │                                             │
-│            ▼                                             │
-│   ┌─────────────────┐                                    │
-│   │  Pre-flight      │                                   │
-│   │  1. Scan for     │── Sensitive data? ── Force local  │
-│   │     secrets      │                                   │
-│   │  2. Check RAM    │── RAM ok? ──────────── Run local  │
-│   │  3. Decide mode  │── RAM tight? ──── Burst to YOUR   │
-│   └─────────────────┘                      Fargate       │
-│                                                          │
-│   Either way: Hardened sandbox, full audit log           │
-│               Your data, your infrastructure             │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                         Your Machine                         │
+│                                                              │
+│  sandboxshift run /workspace "task"                          │
+│           │                                                  │
+│           ▼                                                  │
+│  ┌─────────────────┐                                         │
+│  │   Pre-flight    │── Sensitive data? ──► Force local       │
+│  │  1. Scan        │                                         │
+│  │  2. Check RAM   │── Enough RAM? ──────► Run local         │
+│  │  3. Decide mode │                                         │
+│  └─────────────────┘── Low RAM? ─────────► Burst to AWS      │
+│                                                              │
+│  Either way: isolated sandbox + full audit log               │
+│              your data, your infrastructure                  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Mode is decided **before** the task starts. There is no mid-execution switching (V1 design).
