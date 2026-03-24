@@ -1,11 +1,18 @@
 # sandboxshift.yaml — python-cloud example
 #
-# Bursts to AWS Fargate. Requires 'sandboxshift-setup.sh cloud' to have
-# been run at least once so ~/.sandboxshift/fargate.env exists.
+# Runs a Python task on AWS Fargate with 4 vCPU / 8 GB RAM.
+# Requires cloud setup: ./sandboxshift-setup.sh cloud
 #
-# This example uploads a .env file alongside the workspace.
-# SandboxShift blocks .env uploads by default — workspace.upload_allow
-# explicitly opts this file in. The override is recorded in the audit log.
+# setup: installs dependencies before executing the main task.
+# upload_allow: opts the .env file into S3 upload despite matching
+#               SandboxShift's default sensitive-file filter.
+#
+# Equivalent CLI (overrides this file):
+#   sandboxshift run examples/python-cloud "python main.py" \
+#     --mode cloud \
+#     --setup "pip install -r requirements.txt" \
+#     --allow-file .env \
+#     --env MY_API_KEY=sk_live_xxx
 
 sandbox:
   mode: cloud
@@ -14,11 +21,18 @@ sandbox:
 
 workspace:
   readonly: false
-  # Allow .env to be uploaded to S3 so the task can read runtime config.
-  # Remove or comment this out if your .env contains real secrets —
-  # SandboxShift will then refuse to upload it and force a local run instead.
   upload_allow:
-    - .env
+    - .env   # .env is blocked by default; list it here to opt in for cloud runs
+             # each allowed filename is recorded in the audit log
+
+# Environment variables injected into the container.
+# Useful for API keys, service tokens, and other runtime config.
+# Values are NEVER written to the audit log — only key names are recorded.
+# CLI --env KEY=VAL overrides this entire section when set.
+#
+# env:
+#   MY_API_KEY: "sk_live_xxx"
+#   ENVIRONMENT: production
 
 resources:
   cpu: 4.0
