@@ -424,6 +424,7 @@ sandboxshift audit tail --audit-log /tmp/my-audit.log
 - [x] One-script setup (`sandboxshift-setup.sh`)
 
 ### V2 — Next
+- [ ] **Compose runtime** — `sandboxshift-compose.yml` + `sandboxshift compose up` command. Run multiple repos and sidecar services (MySQL, MongoDB, Redis, Postgres) inside one shared sandbox network. All containers reach each other via `localhost`. Works identically on local (Podman pod) and cloud (ECS multi-container task). Each repo keeps its own `sandboxshift.yaml`; the compose file sits above and wires them together. See [ADR-006](architecture/decisions/ADR-006-compose-runtime.md).
 - [ ] gVisor integration (Layer 3)
 - [ ] Chainguard base images (zero-CVE, SBOM)
 - [ ] Mid-execution migration with checkpoints
