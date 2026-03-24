@@ -38,6 +38,11 @@ class SandboxConfig:
                                   even if they match sensitive patterns (e.g. ['.env',
                                   '.env.dev']). Exact filename match only — not a glob.
                                   Each overridden file is recorded in the audit log.
+        env_vars:                 Extra environment variables injected into the container.
+                                  Keys and values are passed as-is. Values are NEVER
+                                  written to the audit log — only keys are recorded.
+                                  Both Podman (--env KEY=VAL) and Fargate
+                                  (containerOverrides environment) honour this field.
     """
 
     cpu_limit: float = 2.0
@@ -51,3 +56,4 @@ class SandboxConfig:
     min_cpu_required: float = 0.0
     min_memory_mb_required: int = 0
     upload_allow_files: list[str] = field(default_factory=list)
+    env_vars: dict[str, str] = field(default_factory=dict)

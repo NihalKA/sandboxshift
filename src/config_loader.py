@@ -34,6 +34,10 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
             - .env
             - .env.dev
 
+        env:                        # environment variables injected into the container
+          COMPONENTS_UI_NPM_TOKEN: "ghp_xxx"
+          NODE_ENV: production
+
         network:
           allow:
             - pypi.org
@@ -93,6 +97,11 @@ def load_workspace_config(workspace_path: Path) -> dict[str, Any]:
         result["workspace_readonly"] = bool(workspace["readonly"])
     if "upload_allow" in workspace:
         result["upload_allow_files"] = [str(f) for f in list(workspace["upload_allow"])]
+
+    # \u2500\u2500 env section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    raw_env = data.get("env") or {}
+    if isinstance(raw_env, dict) and raw_env:
+        result["env_vars"] = {str(k): str(v) for k, v in raw_env.items()}
 
     # \u2500\u2500 network section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     network = data.get("network") or {}
