@@ -17,7 +17,9 @@ For a full introduction see the [README](../README.md).
 
 | Guide | Description |
 |-------|-------------|
+| [Installation](installation.md) | Local setup, Podman setup, AWS credentials, and Terraform/cloud setup |
 | [Getting Started](getting-started.md) | Install → first local run → cloud burst setup — full walkthrough |
+| [Usage Guide](usage.md) | Quick start examples, CLI flags, env vars, and advanced usage |
 | [Configuration Reference](configuration.md) | Full `sandboxshift.yaml` and environment variable reference |
 
 ---

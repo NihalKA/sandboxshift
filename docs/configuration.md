@@ -1,161 +1,180 @@
 # Configuration Reference
 
-Full reference for `sandboxshift.yaml` and environment variables.
+Full reference for `sandboxshift.yaml`, CLI precedence, and cloud environment variables.
+
+For install and CLI examples, see [installation.md](installation.md) and [usage.md](usage.md).
 
 ---
 
 ## sandboxshift.yaml
 
-Create this file in your project root to set per-project defaults.
+Create `sandboxshift.yaml` in your project root to set per-project defaults.
 
 ```yaml
+# sandboxshift.yaml — place in your workspace root
+
 sandbox:
-  runtime: auto       # auto | local | cloud
-  timeout: 1800       # seconds before killing sandbox
+  timeout: 1800              # kill sandbox after this many seconds (default: 1800)
+  setup: "npm ci"            # run this before your main task (e.g. install deps)
+  skip_sensitivity_check: false  # set true to bypass secret scanning (use with caution)
+  mode: auto                 # local | cloud | auto (default: auto)
+                             # local  = always run in Podman, ignore RAM
+                             # cloud  = always burst to Fargate, ignore RAM
+                             # auto   = decide by available RAM (uses --ram-threshold)
+                             # CLI --mode overrides this. Never overrides sensitive-data detection.
 
 workspace:
-  mount: ./src        # path relative to project root
-  readonly: false     # if true, mount is read-only inside container
+  readonly: false            # true = workspace mounted read-only inside container
+  upload_allow:              # filenames to upload to S3 even though they match sensitive patterns
+    - .env                   # exact filename match only — not a glob
+    - .env.staging           # each overridden file is recorded in the audit log
+                             # CLI --allow-file overrides this list entirely when set
+
+env:                         # environment variables injected into the container
+  COMPONENTS_UI_NPM_TOKEN: "ghp_xxx"  # solves yarn .npmrc ${TOKEN} expansion errors
+  NODE_ENV: production       # works in both local (Podman) and cloud (Fargate)
+                             # values are NEVER written to the audit log
+                             # CLI --env KEY=VAL overrides this entire section when set
 
 network:
+  # LOCAL ONLY — enforced via --dns=none + --add-host in Podman.
+  # In cloud (Fargate), outbound access is controlled by the AWS Security Group
+  # provisioned by Terraform at setup time. This list is audited but not enforced.
   allow:
     - pypi.org
+    - npmjs.com
     - api.github.com
-  block_all_others: true
+  # Use ["*"] to allow ALL outbound traffic (local) — disables Security Layer 4
+  # allow:
+  #   - "*"
 
 resources:
-  cpu: 2              # CPU cores
-  memory: 4GB         # memory limit
+  # -- Container limits: applied to BOTH local and cloud --
+  cpu: 2
+  memory: 4GB
 
-sensitivity:
-  level: auto         # auto | force_local
+  # -- Host requirements (burst triggers) --
+  min_cpu: 4
+  min_memory: 8GB
+
+ports:
+  - 3000:3000
+  - 8080:80
 ```
 
 ---
 
-## sandbox
+## Key facts
 
-### `sandbox.runtime`
-
-Controls the sandbox execution mode.
-
-| Value | Behaviour |
-|-------|----------|
-| `auto` | BurstEngine decides: local if RAM sufficient, cloud if tight (Decision #5) |
-| `local` | Always run on your machine via Podman |
-| `cloud` | Always run on your AWS Fargate |
-
-Mode is decided **once, before the task starts**. There is no mid-execution switching (V1 design decision).
-
-### `sandbox.timeout`
-
-Seconds before the sandbox is killed. Default: `1800` (30 minutes).
+- YAML is merged with CLI flags — CLI wins on conflicts, except `ports`, which are combined
+- `env:` values are injected into the sandbox and are never written to the audit log
+- `resources.cpu` and `resources.memory` apply to both local and cloud runs
+- `resources.min_cpu` and `resources.min_memory` are host requirements that can force cloud
+- `network.allow` is enforced locally; in cloud it is recorded but not enforced by SandboxShift itself
+- `workspace.upload_allow` explicitly allowlists sensitive filenames for cloud upload
 
 ---
 
-## workspace
+## YAML vs CLI precedence
 
-### `workspace.mount`
-
-Path to mount into the sandbox. Relative to the project root. **Only this directory is visible to the agent** — nothing else on your filesystem.
-
-Sensitive paths are rejected at the API boundary and CLI boundary:
-- `~/.aws`, `~/.ssh`, `~/.gnupg`
-- `/etc`, `/proc`, `/sys`, `/root`
-
-### `workspace.readonly`
-
-If `true`, mount the workspace read-only inside the container. Default: `false`.
-
----
-
-## network
-
-### `network.allow`
-
-List of FQDNs the sandbox may reach outbound. **FQDNs only — bare IP addresses are rejected** (Decision #39, prevents SSRF against AWS IMDS at `169.254.169.254`).
-
-```yaml
-network:
-  allow:
-    - pypi.org
-    - files.pythonhosted.org
-    - api.github.com
-```
-
-### `network.block_all_others`
-
-Always `true` in V1. The security group and Podman network policy enforce a default-deny outside the allowlist.
+| Setting | YAML key | CLI flag | Priority |
+|---------|----------|----------|----------|
+| Run mode | `sandbox.mode` | `--mode` | CLI wins. `--mode auto` defers to YAML. Neither can override sensitive-data detection. |
+| Timeout | `sandbox.timeout` | `--timeout` | CLI wins |
+| Setup command | `sandbox.setup` | `--setup` | CLI wins |
+| Skip scan | `sandbox.skip_sensitivity_check` | `--skip-sensitivity-check` | CLI wins |
+| Env vars | `env:` | `--env` | CLI replaces YAML entirely when set |
+| Network allow | `network.allow` | `--allow` | CLI replaces YAML entirely |
+| CPU limit | `resources.cpu` | `--cpu` | CLI wins |
+| Memory limit | `resources.memory` | `--memory-mb` | CLI wins |
+| Ports | `ports` | `--port` | Combined (YAML + CLI, deduped) |
+| Readonly mount | `workspace.readonly` | no CLI flag | YAML only |
+| Upload allow-list | `workspace.upload_allow` | `--allow-file` | CLI replaces YAML entirely when set |
+| Min CPU | `resources.min_cpu` | no CLI flag | YAML only |
+| Min memory | `resources.min_memory` | no CLI flag | YAML only |
+| RAM threshold | no YAML key | `--ram-threshold` | CLI only |
+| Audit log path | no YAML key | `--audit-log` | CLI / env var only |
 
 ---
 
-## resources
+## Fargate valid CPU / memory combinations
 
-### `resources.cpu`
+When running in cloud mode, `resources.cpu` and `resources.memory` must be a valid Fargate combination.
 
-CPU cores allocated to the sandbox. Maps to:
-- **Podman**: `--cpus` flag
-- **Fargate**: CPU units (1 core = 1024 units)
+| CPU (`resources.cpu`) | Min memory | Max memory |
+|-----------------------|-----------|------------|
+| 0.25 vCPU | 512 MB | 2 GB |
+| 0.5 vCPU | 1 GB | 4 GB |
+| 1 vCPU | 2 GB | 8 GB |
+| 2 vCPU | 4 GB | 16 GB |
+| 4 vCPU | 8 GB | 30 GB |
+| 8 vCPU | 16 GB | 60 GB |
+| 16 vCPU | 32 GB | 120 GB |
 
-Valid range (CLI): `0.25` – `64.0`. Default: `2`.
-
-### `resources.memory`
-
-Memory limit. Maps to:
-- **Podman**: `--memory` flag
-- **Fargate**: memory MiB
-
-Valid range (CLI): `128` MB – `65536` MB (64 GB). Default: `4096` MB.
+For the full list and increment rules, see the [AWS Fargate task size documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html).
 
 ---
 
-## sensitivity
+## Cloud environment variables
 
-### `sensitivity.level`
+These are read by the CLI from `~/.sandboxshift/fargate.env` after cloud setup.
 
-| Value | Behaviour |
-|-------|----------|
-| `auto` | Run all detection layers — file patterns + content scanning (Decision #6) |
-| `force_local` | Skip BurstEngine, always use local regardless of RAM |
+### Required for cloud runs
 
-`off` is not available in V1 — sensitivity detection cannot be disabled (fail-closed design).
+| Variable | Description |
+|----------|-------------|
+| `FARGATE_CLUSTER_ARN` | ECS cluster ARN |
+| `FARGATE_EXECUTION_ROLE_ARN` | ECS task execution role ARN |
+| `FARGATE_TASK_ROLE_ARN` | ECS task role ARN |
+| `FARGATE_SUBNET_IDS` | Comma-separated subnet IDs |
+| `FARGATE_SECURITY_GROUP_IDS` | Comma-separated security group IDs |
+| `FARGATE_LOG_GROUP` | CloudWatch log group |
+| `FARGATE_REGION` | AWS region |
+| `FARGATE_WORKSPACE_BUCKET` | S3 bucket used for workspace staging |
 
-**Scan error behaviour (Decision #9):** If the sensitivity scan itself fails (e.g., a file permission error), SandboxShift forces local execution. A scan error never silently allows cloud execution.
-
----
-
-## Environment Variables
+### Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FARGATE_CLUSTER_ARN` | — | Required for cloud burst. ECS cluster ARN from `terraform output cluster_arn`. |
-| `FARGATE_TASK_DEFINITION_ARN` | — | Required for cloud burst. ECS task definition ARN from `terraform output task_def_arn`. |
-| `FARGATE_SUBNET_IDS` | — | Required for cloud burst. Comma-separated subnet IDs from `terraform output -json subnet_ids`. |
-| `FARGATE_SECURITY_GROUP_IDS` | — | Required for cloud burst. Comma-separated SG IDs from `terraform output -json security_group_ids`. |
-| `FARGATE_LOG_GROUP` | — | Required for cloud burst. CloudWatch log group from `terraform output log_group`. |
-| `FARGATE_REGION` | — | Required for cloud burst. AWS region from `terraform output region`. |
-| `SANDBOXSHIFT_AUDIT_LOG` | `~/.sandboxshift/audit.log` | Override the audit log file path. Useful in CI pipelines. |
+| `FARGATE_SERVER_SECURITY_GROUP_ID` | — | Extra security group used for server tasks |
+| `FARGATE_TASK_FAMILY` | `sandboxshift-sandbox` | ECS task family prefix |
+| `FARGATE_ECR_IMAGE` | runtime image from setup | Container image used for cloud runs |
+| `SANDBOXSHIFT_AUDIT_LOG` | `~/.sandboxshift/audit.log` | Override audit log path |
 
-**If any of the 6 `FARGATE_*` variables are missing**, SandboxShift silently falls back to local-only mode. This is intentional — cloud burst requires explicit opt-in via Terraform provisioning.
-
-**Default RAM threshold:** 4 GB of available system RAM (Decision #16). When available RAM drops below this, BurstEngine chooses cloud (if configured). This threshold is not currently user-configurable via `sandboxshift.yaml` in V1.
+If the required `FARGATE_*` values are missing, SandboxShift falls back to local-only mode.
 
 ---
 
-## Sensitive File Patterns Detected
+## Protected local paths
 
-SensitivityScanner (Layer 2 of the security model) checks for these patterns:
+Workspaces inside these locations are rejected:
 
-**File name patterns:**
+- `~/.aws`
+- `~/.ssh`
+- `~/.gnupg`
+- `/etc`
+- `/proc`
+- `/sys`
+- `/root`
+
+---
+
+## Sensitive file patterns detected
+
+Sensitivity scanning checks for these common patterns before allowing cloud execution.
+
+### File name patterns
+
 - `.env`, `.env.*`
 - `*.pem`, `*.key`, `*.p12`
 - `credentials.json`, `*secret*`, `*token*`
-- Files inside `~/.aws`, `~/.ssh`
+- files inside `~/.aws` and `~/.ssh`
 
-**Content patterns:**
-- AWS access keys: `AKIA[0-9A-Z]{16}`
-- Private key headers: `-----BEGIN * PRIVATE KEY-----`
-- Password assignments: `password=`, `secret=`
-- Internal IP ranges: `10.x.x.x`, `192.168.x.x`
+### Content patterns
 
-When any pattern matches, `sensitivity_reasons` in the response explains exactly what was found and why local execution was forced.
+- AWS access keys like `AKIA...`
+- private key headers
+- password and secret assignments
+- internal IP ranges such as `10.x.x.x` and `192.168.x.x`
+
+If any pattern matches, SandboxShift forces local execution.
