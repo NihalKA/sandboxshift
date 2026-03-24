@@ -42,6 +42,9 @@ because it is a completely separate directory from /workspace.
 PORT env var is injected when ports are configured (Decision #57). This
 lets apps read process.env.PORT (Node) or $PORT (shell/Python) without
 hardcoding the port number. Uses the first configured container port.
+
+User env vars (config.env_vars) are injected via --env KEY=VAL (Decision #65).
+Values are never written to the audit log — only keys are recorded.
 """
 
 from __future__ import annotations
@@ -277,6 +280,7 @@ class PodmanRuntime(Runtime):
                 "image": image,
                 "workspace": str(workspace),
                 "ports": [[h, c] for h, c in config.ports],
+                "env_var_keys": list(config.env_vars.keys()),
             }
         )
 
@@ -315,6 +319,10 @@ class PodmanRuntime(Runtime):
         ``PORT=<container_port>`` is injected when ports are configured
         (Decision #57). Apps can read process.env.PORT (Node) or $PORT
         without hardcoding the port number.
+
+        User env vars from ``config.env_vars`` are injected via
+        ``--env KEY=VAL`` (Decision #65). Values are never written to the
+        audit log — only keys are recorded.
 
         Args:
             instance_id: Returned by provision().
@@ -366,6 +374,12 @@ class PodmanRuntime(Runtime):
         if state.config.ports:
             port_flags.extend(["--env", f"PORT={state.config.ports[0][1]}"])
 
+        # Inject user-defined env vars (Decision #65).
+        # Values are never written to the audit log — only keys are recorded.
+        user_env_flags: list[str] = []
+        for k, v in state.config.env_vars.items():
+            user_env_flags.extend(["--env", f"{k}={v}"])
+
         # --entrypoint /bin/sh overrides any ENTRYPOINT set by the base image
         # (Decision #53). Ensures the task always runs via /bin/sh -c regardless
         # of what the image's ENTRYPOINT is set to.
@@ -401,6 +415,7 @@ class PodmanRuntime(Runtime):
             "/bin/sh",
             *network_flags,
             *port_flags,
+            *user_env_flags,
             state.image,
             "-c",
             shell_cmd,
@@ -439,6 +454,7 @@ class PodmanRuntime(Runtime):
                     "exit_code": exit_code,
                     "duration_seconds": round(duration, 3),
                     "ports": [[h, c] for h, c in state.config.ports],
+                    "env_var_keys": list(state.config.env_vars.keys()),
                     "streaming": True,
                 }
             )
@@ -470,6 +486,7 @@ class PodmanRuntime(Runtime):
                     "exit_code": result.returncode,
                     "duration_seconds": round(duration, 3),
                     "ports": [],
+                    "env_var_keys": list(state.config.env_vars.keys()),
                     "streaming": False,
                 }
             )
