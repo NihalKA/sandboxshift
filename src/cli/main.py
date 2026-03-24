@@ -402,6 +402,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     _load_fargate_env()
 
     import boto3  # local import — only needed for this subcommand
+    from botocore.exceptions import ClientError  # noqa: PLC0415
 
     if not _SERVERS_FILE.exists():
         print("No running cloud servers found.", file=sys.stderr)
@@ -448,13 +449,26 @@ def _cmd_stop(args: argparse.Namespace) -> None:
             reason="sandboxshift stop command",
         )
         print(f"Stopped server {instance_id}")
-
-        del servers[instance_id]
-        _SERVERS_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
-
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        error_msg = e.response.get("Error", {}).get("Message", "")
+        if (
+            error_code == "InvalidParameterException"
+            and "task was not found" in error_msg.lower()
+        ):
+            # Task already gone from AWS (crashed, expired, or stopped externally).
+            # Still clean up the local servers.json entry so it stops appearing in `list`.
+            print(f"Note: task {instance_id} was already gone from AWS — removing stale entry")
+        else:
+            print(f"Error stopping task: {e}", file=sys.stderr)
+            sys.exit(1)
     except Exception as e:
         print(f"Error stopping task: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Always reached on both success and stale-task paths — clean up servers.json.
+    del servers[instance_id]
+    _SERVERS_FILE.write_text(json.dumps(servers, indent=2), encoding="utf-8")
 
 
 def _cmd_audit_tail(args: argparse.Namespace) -> None:
